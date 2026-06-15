@@ -1,0 +1,12 @@
+{
+  "name": "zhihu-auto-scroll",
+  "private": true,
+  "scripts": {
+    "check": "node --check zhihu-auto-scroll.js",
+    "test": "node --test tests/*.test.js",
+    "test:smoke": "playwright test tests/smoke.spec.js --reporter=line"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
+}

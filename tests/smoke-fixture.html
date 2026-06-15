@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Zhihu Auto Scroll Smoke Fixture</title>
+  <style>
+    body { margin: 0; font: 16px sans-serif; }
+    header, aside, .Comments-container, .AnswerItem { padding: 24px; margin: 12px; border: 1px solid #ccc; }
+    aside { position: absolute; right: 0; width: 220px; }
+    .Question-mainColumn { width: 700px; min-height: 2600px; }
+    .AnswerItem { min-height: 420px; }
+  </style>
+</head>
+<body>
+  <header><button data-decoy="header">显示全部</button></header>
+  <main class="Question-main">
+    <section class="Question-mainColumn">
+      <div class="QuestionAnswers-answers">
+        <div class="List-header"><h4 class="List-headerText"><span>3 个回答</span></h4></div>
+        <article class="AnswerItem" data-zop='{"itemId":"answer-1"}'><button data-answer="1">阅读全文</button></article>
+        <button data-load-more="1">加载更多</button>
+      </div>
+    </section>
+    <aside class="Question-sideColumn"><button data-decoy="side">阅读全文</button></aside>
+    <section class="Comments-container"><button data-decoy="comment">阅读全文</button></section>
+  </main>
+  <script>
+    window.smoke = { answerClicks: 0, loadClicks: 0, decoyClicks: 0, scrollBehaviors: [] };
+    const nativeScrollBy = window.scrollBy.bind(window);
+    const nativeScrollTo = window.scrollTo.bind(window);
+    window.scrollBy = (...args) => {
+      window.smoke.scrollBehaviors.push(args[0]?.behavior);
+      nativeScrollBy(...args);
+    };
+    window.scrollTo = (...args) => {
+      window.smoke.scrollBehaviors.push(args[0]?.behavior);
+      nativeScrollTo(...args);
+    };
+    document.querySelector('[data-answer]').addEventListener('click', event => {
+      window.smoke.answerClicks++;
+      event.currentTarget.textContent = '收起';
+    });
+    document.querySelector('[data-load-more]').addEventListener('click', event => {
+      window.smoke.loadClicks++;
+      const answer = document.createElement('article');
+      answer.className = 'AnswerItem';
+      answer.dataset.zop = '{"itemId":"answer-2"}';
+      answer.innerHTML = '<button data-answer="2">阅读全文</button>';
+      answer.querySelector('button').addEventListener('click', clickEvent => {
+        window.smoke.answerClicks++;
+        clickEvent.currentTarget.textContent = '收起';
+      });
+      event.currentTarget.before(answer);
+      event.currentTarget.remove();
+    });
+    document.querySelectorAll('[data-decoy]').forEach(button => button.addEventListener('click', () => window.smoke.decoyClicks++));
+  </script>
+  <script src="/zhihu-auto-scroll.js"></script>
+</body>
+</html>
