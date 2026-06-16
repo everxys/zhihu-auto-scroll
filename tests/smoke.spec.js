@@ -170,3 +170,21 @@ test('comment mode avoids repeated full action scans on long pages', async ({ pa
   expect(probe.documentActionQueries).toBe(0);
   expect(probe.broadActionQueries).toBeLessThanOrEqual(2);
 });
+
+test('comment mode closes delayed comment dialogs on the next run', async ({ page }) => {
+  await page.goto('http://127.0.0.1:51999/question/123');
+  const panel = page.locator('#zhihu-auto-expand-panel');
+  await panel.locator('.zae-open-panel').click();
+  await panel.locator('.zae-comment-toggle').click();
+  await page.evaluate(() => {
+    const dialog = document.createElement('div');
+    dialog.className = 'Modal-wrapper';
+    dialog.innerHTML = '<button type="button" aria-label="关闭">关闭</button><div class="Modal-content">28 条评论 默认最新</div>';
+    dialog.querySelector('button').addEventListener('click', () => dialog.remove());
+    document.body.appendChild(dialog);
+  });
+
+  await panel.locator('.zae-start').click();
+  await expect(page.locator('.Modal-wrapper')).toHaveCount(0);
+  await panel.locator('.zae-pause').click();
+});

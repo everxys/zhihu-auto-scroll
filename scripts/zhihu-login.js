@@ -1,36 +1,59 @@
+#!/usr/bin/env node
 const readline = require('node:readline/promises');
 const { stdin: input, stdout: output } = require('node:process');
-const { chromium } = require('playwright');
+const os = require('node:os');
+const path = require('node:path');
 const {
   AUTH_DIR,
   AUTH_FILE,
   LOGIN_URL,
   ensureDir,
-  fileExists,
+  parseArgs,
+  writeText,
+  launchNativeBrowserSession,
 } = require('./zhihu-automation');
 
-async function main() {
-  ensureDir(AUTH_DIR);
-  const browser = await chromium.launch({ headless: false });
-  try {
-    const contextOptions = fileExists(AUTH_FILE) ? { storageState: AUTH_FILE } : {};
-    const context = await browser.newContext(contextOptions);
-    const page = await context.newPage();
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+const HELP = `
+Usage:
+  zhihu login
+  zhihu login --channel chrome
 
-    console.log('已打开知乎登录页。请在浏览器里手动登录。');
-    console.log(`完成后回到终端按 Enter，会覆盖保存登录态到 ${AUTH_FILE}`);
+Options:
+  --channel <name>   Login browser: chrome or msedge. Defaults to system Chrome, then Edge.
+  --help             Show help.
+`.trim();
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help === true || args.h === true) {
+    console.log(HELP);
+    return;
+  }
+  if (args.channel === 'chromium') {
+    throw new Error('Zhihu blocks Playwright Chromium login. Use zhihu login or zhihu login --channel chrome/msedge.');
+  }
+
+  ensureDir(AUTH_DIR);
+  const session = await launchNativeBrowserSession({
+    channel: args.channel ? String(args.channel).toLowerCase() : null,
+    url: LOGIN_URL,
+  });
+  try {
+    console.log(`Opened the Zhihu login page in ${session.label}. Log in manually in the browser.`);
+    console.log('This is a normal browser window, not a Playwright-controlled login page, to avoid Zhihu login API error 10001.');
+    console.log(`After login, return to this terminal and press Enter. Auth state will be saved to ${AUTH_FILE}`);
     const rl = readline.createInterface({ input, output });
     try {
-      await rl.question('登录完成后按 Enter 保存：');
+      await rl.question('Press Enter after login to save auth state: ');
     } finally {
       rl.close();
     }
 
-    await context.storageState({ path: AUTH_FILE });
-    console.log(`已保存 Playwright 登录态：${AUTH_FILE}`);
+    await session.context.storageState({ path: AUTH_FILE });
+    writeText(path.join(AUTH_DIR, 'zhihu-login-profile.txt'), `${session.profileDir}${os.EOL}`);
+    console.log(`Saved Playwright auth state: ${AUTH_FILE}`);
   } finally {
-    await browser.close();
+    await session.close();
   }
 }
 

@@ -1,8 +1,7 @@
+#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
-const { chromium } = require('playwright');
 const {
-  AUTH_DIR,
   AUTH_FILE,
   DEFAULT_SETTLE_MS,
   DEFAULT_TIMEOUT_MS,
@@ -10,6 +9,7 @@ const {
   ensureDir,
   fileExists,
   parseQuestionUrl,
+  parseQuestionUrlsFromFile,
   questionIdFromUrl,
   defaultArchivePath,
   toPositiveInt,
@@ -20,79 +20,359 @@ const {
   normalizeCookiesForSingleFile,
   getLocalStorageEntries,
   writeJson,
+  writeText,
   writeSingleFileBootstrap,
   runSingleFile,
+  createSingleFileTempDir,
+  defaultDebugDir,
+  formatBytes,
+  formatAutomationProgress,
+  classifyArchiveError,
+  launchNativeBrowserSession,
+  zhihuContextOptions,
+  hydrateContextFromStorageState,
+  createBrowserProfileTempDir,
 } = require('./zhihu-automation');
+
+const HELP = `
+Usage:
+  zhihu archive --url https://www.zhihu.com/question/123
+  zhihu archive --urls-file questions.txt
+
+Options:
+  --url <url>             Archive one Zhihu question page.
+  --urls-file <file>      Batch archive. One Zhihu question URL per line; blank lines and # comments are ignored.
+  --output <path>         HTML file for one URL; output directory for batch mode. Defaults to archives/.
+  --headed                Run Playwright and SingleFile in visible browser windows.
+  --debug                 Enable headed/debug mode and write debug artifacts by default.
+  --debug-dir <dir>       Save console, screenshot, and SingleFile stdout/stderr artifacts.
+  --comments              Open and expand comments.
+  --open-comments         Alias for --comments.
+  --timeout-ms <ms>       Timeout for page automation and SingleFile capture. Default: off.
+  --settle-ms <ms>        Stable wait after page automation completes. Default: 1500.
+  --progress-interval-ms <ms>  Progress log interval while scrolling. Default: 3000.
+  --speed <number>        Set userscript scroll speed.
+  --interval <ms>         Set userscript run interval.
+  --auth <file>           Playwright storageState file. Defaults to .auth/zhihu.storageState.json.
+  --channel <name>        Browser: chrome or msedge.
+  --help                  Show help.
+`.trim();
+
+function printHelp() {
+  console.log(HELP);
+}
+
+function timestamp() {
+  return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function log(message) {
+  console.log(`[${timestamp()}] ${message}`);
+}
+
+function logPreamble(message) {
+  console.log(message);
+}
+
+function logError(message) {
+  console.error(`[${timestamp()}] ${message}`);
+}
+
+function stage(text) {
+  log(text);
+}
+
+function formatTimeout(value) {
+  return value > 0 ? String(value) : 'off';
+}
+
+function normalizeTitle(value) {
+  return String(value || '')
+    .replace(/\s+-\s+知乎$/, '')
+    .replace(/^知乎\s+-\s+/, '')
+    .trim();
+}
+
+function resolveTargets(args) {
+  if (args.url && args['urls-file']) {
+    throw new Error('Use either --url or --urls-file, not both.');
+  }
+  if (args['urls-file']) {
+    const urlsFile = path.resolve(String(args['urls-file']));
+    const targets = parseQuestionUrlsFromFile(urlsFile);
+    if (targets.length === 0) throw new Error(`URL file is empty: ${urlsFile}`);
+    return targets;
+  }
+  return [parseQuestionUrl(args.url)];
+}
+
+function resolveOutput(questionId, title, args, multiple) {
+  if (!args.output) return defaultArchivePath(questionId, new Date(), title);
+  const output = path.resolve(String(args.output));
+  if (!multiple) return output;
+  if (path.extname(output).toLowerCase() === '.html') {
+    throw new Error('--output must be a directory in batch mode, not a single .html file.');
+  }
+  return path.join(output, path.basename(defaultArchivePath(questionId, new Date(), title)));
+}
+
+function createProgressReporter() {
+  const printedProgress = new Set();
+  return (snapshot, meta = {}) => {
+    const progress = formatAutomationProgress(snapshot);
+    if (printedProgress.has(progress)) return;
+    printedProgress.add(progress);
+    const idle = Number.isFinite(snapshot.idleRounds) && snapshot.idleRounds > 0
+      ? `, idle rounds: ${snapshot.idleRounds}`
+      : '';
+    log(`Progress: ${progress}${idle}`);
+  };
+}
+
+function printArchiveContext(target, options) {
+  logPreamble(`Task: question ${target.id}`);
+  logPreamble(`URL: ${target.href}`);
+  logPreamble(`Options: comments=${options.expandComments ? 'on' : 'off'}, timeout-ms=${formatTimeout(options.timeoutMs)}, settle-ms=${options.settleMs}, progress-interval-ms=${options.progressIntervalMs}`);
+  logPreamble(`Options: auth=${options.authFile}, debug=${options.debug ? 'on' : 'off'}`);
+  if (options.scrollSpeed !== undefined) logPreamble(`Options: speed=${options.scrollSpeed}`);
+  if (options.intervalMs !== undefined) logPreamble(`Options: interval=${options.intervalMs}`);
+  if (options.args.output) logPreamble(`Options: output=${options.args.output}`);
+  if (options.debugDir) logPreamble(`Options: debug-dir=${options.debugDir}`);
+}
+
+async function captureDebugArtifacts(debugDir, page, consoleLines, singleFileResult, error) {
+  if (!debugDir) return;
+  ensureDir(debugDir);
+  writeText(path.join(debugDir, 'console.log'), `${consoleLines.join('\n')}\n`);
+  writeText(path.join(debugDir, 'singlefile.stdout.log'), singleFileResult?.stdout || error?.stdout || '');
+  writeText(path.join(debugDir, 'singlefile.stderr.log'), singleFileResult?.stderr || error?.stderr || '');
+  if (error) writeText(path.join(debugDir, 'error.txt'), `${error.stack || error.message || error}\n`);
+  if (page && !page.isClosed()) {
+    await page.screenshot({ path: path.join(debugDir, 'screenshot.png'), fullPage: true }).catch(() => {});
+  }
+}
+
+async function assertUsableQuestionPage(page, questionId) {
+  const currentUrl = page.url();
+  const state = await page.evaluate(() => ({
+    bodyText: document.body?.innerText || '',
+    hasQuestion: Boolean(document.querySelector('.QuestionHeader, .Question-main, .QuestionAnswer-content, .AnswerItem')),
+    hasSignFlow: Boolean(document.querySelector('.SignFlow, .Login-content')),
+  })).catch(() => ({ bodyText: '', hasQuestion: false, hasSignFlow: false }));
+  if (/验证码|安全验证|人机验证|验证你是真人|异常流量|请求存在异常|暂时限制|40362/.test(state.bodyText)) {
+    throw new Error(`Zhihu CAPTCHA or anti-bot verification is required. Current page: ${currentUrl}`);
+  }
+  if (/signin|login/i.test(currentUrl) || state.hasSignFlow || (!state.hasQuestion && /登录知乎|注册\/登录/.test(state.bodyText))) {
+    throw new Error(`Auth state is expired. Current page: ${currentUrl}`);
+  }
+  if (questionIdFromUrl(currentUrl) !== questionId) {
+    throw new Error(`Failed to open the target question page. Current page: ${currentUrl}`);
+  }
+}
+
+async function runArchiveJob(browser, target, options) {
+  const consoleLines = [];
+  let context = null;
+  let ownsContext = true;
+  let page = null;
+  let singleFileResult = null;
+  let output = null;
+  const tempDir = createSingleFileTempDir();
+  const cookiesFile = path.join(tempDir, 'cookies.json');
+  const bootstrapFile = path.join(tempDir, 'bootstrap.js');
+  const startedAt = Date.now();
+  let saveStartedAt = 0;
+  try {
+    printArchiveContext(target, options);
+    stage('1/6 Open page');
+    if (options.context) {
+      context = options.context;
+      ownsContext = false;
+    } else {
+      context = await browser.newContext(zhihuContextOptions({ storageState: options.authFile }));
+    }
+    page = await context.newPage();
+    page.on('console', message => {
+      consoleLines.push(`${message.type()}: ${message.text()}`);
+    });
+    page.on('pageerror', error => {
+      consoleLines.push(`pageerror: ${error.message}`);
+    });
+
+    await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await assertUsableQuestionPage(page, target.id);
+
+    stage('2/6 Inject userscript');
+    await injectUserscript(page);
+
+    stage(options.expandComments ? '3/6 Scroll, expand answers, and open comments' : '3/6 Scroll and expand answers');
+    await configureAndStart(page, {
+      expandComments: options.expandComments,
+      scrollSpeed: options.scrollSpeed,
+      intervalMs: options.intervalMs,
+    });
+    const snapshot = await waitForAutomationDone(page, {
+      timeoutMs: options.timeoutMs,
+      settleMs: options.settleMs,
+      onProgress: createProgressReporter(),
+      progressIntervalMs: options.progressIntervalMs,
+    });
+    if (snapshot.completionStatus === 'auth-blocked') {
+      throw new Error(`Zhihu requires login or verification: ${snapshot.completionReason || 'auth-blocked'}`);
+    }
+    if (snapshot.completionStatus === 'error') {
+      throw new Error(`Page script failed: ${snapshot.completionReason || 'error'}`);
+    }
+
+    const pageTitle = normalizeTitle(await page.title().catch(() => ''));
+    output = resolveOutput(target.id, pageTitle, options.args, options.multiple);
+    ensureDir(path.dirname(output));
+
+    stage('4/6 Export auth state');
+    const storageState = await context.storageState();
+    writeJson(cookiesFile, normalizeCookiesForSingleFile(storageState.cookies || []));
+    writeSingleFileBootstrap(bootstrapFile, {
+      expandComments: options.expandComments,
+      scrollSpeed: options.scrollSpeed,
+      intervalMs: options.intervalMs,
+      timeoutMs: options.timeoutMs,
+      settleMs: options.settleMs,
+      localStorage: getLocalStorageEntries(storageState, new URL(target.href).origin),
+    });
+
+    stage(`5/6 Save with SingleFile: ${output}`);
+    saveStartedAt = Date.now();
+    singleFileResult = await runSingleFile({
+      url: target.href,
+      output,
+      cookiesFile,
+      bootstrapFile,
+      headless: options.singleFileHeadless,
+      debug: options.debug,
+      timeoutMs: options.timeoutMs,
+      browserExecutablePath: options.browserExecutablePath,
+    });
+    const saveMs = Date.now() - saveStartedAt;
+
+    stage('6/6 Done');
+    const fileSize = fs.statSync(output).size;
+    const summary = {
+      ok: true,
+      output,
+      answerCount: snapshot.answerCount,
+      totalAnswerCount: snapshot.totalAnswerCount,
+      completionStatus: snapshot.completionStatus,
+      completionReason: snapshot.completionReason,
+      fileSize,
+      saveMs,
+      totalMs: Date.now() - startedAt,
+    };
+    printSummary(summary);
+    await captureDebugArtifacts(options.debugDir, page, consoleLines, singleFileResult, null);
+    return summary;
+  } catch (error) {
+    const classified = classifyArchiveError(error, { currentUrl: page?.url() });
+    const wrapped = Object.assign(error, { archiveCode: classified.code, archiveMessage: classified.message });
+    await captureDebugArtifacts(options.debugDir, page, consoleLines, singleFileResult, wrapped);
+    logError(`Failed: ${classified.message}`);
+    return { ok: false, url: target.href, code: classified.code, message: classified.message };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    if (ownsContext) await context?.close().catch(() => {});
+    else await page?.close().catch(() => {});
+  }
+}
+
+function printSummary(summary) {
+  const total = summary.totalAnswerCount ?? '?';
+  log('Summary:');
+  log(`- Answers: ${summary.answerCount}/${total}`);
+  log(`- Completion reason: ${summary.completionStatus} (${summary.completionReason})`);
+  log(`- File size: ${formatBytes(summary.fileSize)}`);
+  log(`- Save time: ${(summary.saveMs / 1000).toFixed(1)}s`);
+  log(`- Total time: ${(summary.totalMs / 1000).toFixed(1)}s`);
+  log(`- Output file: ${summary.output}`);
+}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const { href: url, id: questionId } = parseQuestionUrl(args.url);
+  if (args.help === true || args.h === true) {
+    printHelp();
+    return;
+  }
+
+  const targets = resolveTargets(args);
   const authFile = path.resolve(String(args.auth || AUTH_FILE));
   if (!fileExists(authFile)) {
-    throw new Error(`缺少登录态文件：${authFile}\n请先运行 npm run zhihu:login`);
+    throw new Error(`Missing auth state file: ${authFile}\nRun zhihu login first.`);
   }
 
-  const headless = !args.headed && !args.debug;
-  const timeoutMs = toPositiveInt(args['timeout-ms'], DEFAULT_TIMEOUT_MS);
-  const settleMs = toPositiveInt(args['settle-ms'], DEFAULT_SETTLE_MS);
-  const expandComments = args.comments === true || args['expand-comments'] === true;
-  const scrollSpeed = toOptionalNumber(args.speed);
-  const intervalMs = toOptionalNumber(args.interval);
-  const output = path.resolve(String(args.output || defaultArchivePath(questionId)));
-  ensureDir(path.dirname(output));
-  ensureDir(AUTH_DIR);
+  const debug = args.debug === true;
+  const multiple = targets.length > 1;
+  const debugRoot = args['debug-dir']
+    ? path.resolve(args['debug-dir'] === true ? defaultDebugDir() : String(args['debug-dir']))
+    : (debug ? defaultDebugDir() : null);
+  if (debugRoot) ensureDir(debugRoot);
 
-  const browser = await chromium.launch({ headless });
-  const context = await browser.newContext({
-    storageState: authFile,
-    viewport: { width: 1280, height: 900 },
+  const browserProfileDir = createBrowserProfileTempDir('zhihu-archive-profile');
+  const launched = await launchNativeBrowserSession({
+    channel: args.channel,
+    url: 'about:blank',
+    profileDir: browserProfileDir,
   });
-  const page = await context.newPage();
+  const { browser, context } = launched;
+  logPreamble(`Browser: ${launched.label}`);
+  logPreamble(`Target count: ${targets.length}`);
+  await hydrateContextFromStorageState(context, authFile);
+  const options = {
+    args,
+    authFile,
+    multiple,
+    context,
+    browserExecutablePath: launched.executable,
+    singleFileHeadless: false,
+    debug,
+    expandComments: args.comments === true || args['expand-comments'] === true || args['open-comments'] === true,
+    scrollSpeed: toOptionalNumber(args.speed),
+    intervalMs: toOptionalNumber(args.interval),
+    progressIntervalMs: toPositiveInt(args['progress-interval-ms'], 3000),
+    timeoutMs: toPositiveInt(args['timeout-ms'], DEFAULT_TIMEOUT_MS),
+    settleMs: toPositiveInt(args['settle-ms'], DEFAULT_SETTLE_MS),
+  };
+
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    if (questionIdFromUrl(page.url()) !== questionId) {
-      throw new Error(`打开目标问题页失败，当前页面是 ${page.url()}。登录态可能已失效，请重新运行 npm run zhihu:login`);
+    const results = [];
+    for (let index = 0; index < targets.length; index++) {
+      const target = targets[index];
+      const jobDebugDir = debugRoot
+        ? path.join(debugRoot, multiple ? `question-${target.id}-${index + 1}` : '')
+        : null;
+      results.push(await runArchiveJob(browser, target, {
+        ...options,
+        debugDir: jobDebugDir,
+      }));
     }
-    await injectUserscript(page);
-    await configureAndStart(page, { expandComments, scrollSpeed, intervalMs });
-    const snapshot = await waitForAutomationDone(page, { timeoutMs, settleMs });
-    console.log(`Playwright 自动展开完成：已发现 ${snapshot.answerCount}/${snapshot.totalAnswerCount ?? '?'} 个回答`);
-
-    const storageState = await context.storageState();
-    const cookiesFile = path.join(AUTH_DIR, `zhihu.singlefile.cookies.${process.pid}.json`);
-    const bootstrapFile = path.join(AUTH_DIR, `zhihu.singlefile.bootstrap.${process.pid}.js`);
-    writeJson(cookiesFile, normalizeCookiesForSingleFile(storageState.cookies || []));
-    writeSingleFileBootstrap(bootstrapFile, {
-      expandComments,
-      scrollSpeed,
-      intervalMs,
-      timeoutMs,
-      settleMs,
-      localStorage: getLocalStorageEntries(storageState, new URL(url).origin),
-    });
-
-    try {
-      await runSingleFile({
-        url,
-        output,
-        cookiesFile,
-        bootstrapFile,
-        headless,
-        debug: args.debug === true,
-        timeoutMs,
-      });
-    } finally {
-      fs.rmSync(cookiesFile, { force: true });
-      fs.rmSync(bootstrapFile, { force: true });
+    const failed = results.filter(result => !result.ok);
+    if (multiple) {
+      log(`Batch archive complete: succeeded ${results.length - failed.length}, failed ${failed.length}`);
     }
+    if (failed.length > 0) process.exitCode = 1;
   } finally {
-    await browser.close();
+    await launched.close();
+    try {
+      fs.rmSync(browserProfileDir, { recursive: true, force: true });
+    } catch {}
   }
-
-  console.log(`已保存归档：${output}`);
 }
 
-main().catch(error => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch(error => {
+    const classified = classifyArchiveError(error);
+    logError(classified.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  createProgressReporter,
+};

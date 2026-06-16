@@ -894,7 +894,7 @@
         });
       }
       recentlyClickedCommentEntries.clear();
-      return closedCount;
+      return { closedCount, authBlocked: blockedByAuth };
     }
 
     function clickCandidate(element, now, getTargetType) {
@@ -1205,6 +1205,8 @@
     let timerStartedAt = null;
     let currentQuestionId = null;
     let destroyed = false;
+    let completionStatus = 'paused';
+    let completionReason = 'not-started';
 
     function questionId() {
       return location.pathname.match(/^\/question\/(\d+)/)?.[1] || null;
@@ -1222,6 +1224,8 @@
           (scheduler.getState() === 'running' && timerStartedAt ? Date.now() - timerStartedAt : 0),
         answerCount: expander.getAnswerCount(),
         totalAnswerCount,
+        completionStatus,
+        completionReason,
       };
     }
 
@@ -1241,6 +1245,8 @@
     function start() {
       if (destroyed || !questionId() || scheduler.getState() === 'running') return;
       idleRounds = 0;
+      completionStatus = 'running';
+      completionReason = 'running';
       previousAnswerCount = expander.getAnswerCount();
       previousScrollHeight = scroller.getHeight();
       timerStartedAt = Date.now();
@@ -1253,10 +1259,20 @@
     function pause(message = '已暂停') {
       if (scheduler.getState() === 'running' && timerStartedAt) totalScrollMs += Date.now() - timerStartedAt;
       timerStartedAt = null;
+      if (completionStatus === 'running') {
+        completionStatus = 'paused';
+        completionReason = 'manual';
+      }
       scheduler.pause();
       panel.stopTimer();
       panel.setStatus(message);
       render();
+    }
+
+    function complete(status, reason, message) {
+      completionStatus = status;
+      completionReason = reason;
+      pause(message);
     }
 
     async function runOnce(signal) {
@@ -1266,10 +1282,21 @@
           panel.setStatus('后台标签页：等待恢复');
           return;
         }
+        const staleDialogResult = expander.closeUnexpectedCommentDialogs();
+        if (staleDialogResult.authBlocked) {
+          complete('auth-blocked', 'auth-dialog', '已暂停：知乎要求登录或验证');
+          return;
+        }
         expander.queueVisibleCommentEntries();
         const { clickedCount, commentClicked } = expander.processPending(signal);
         if (clickedCount > 0) await abortableSleep(POLICY.afterClickDelayMs, signal);
-        if (commentClicked) expander.closeUnexpectedCommentDialogs();
+        if (commentClicked) {
+          const dialogResult = expander.closeUnexpectedCommentDialogs();
+          if (dialogResult.authBlocked) {
+            complete('auth-blocked', 'auth-dialog', '已暂停：知乎要求登录或验证');
+            return;
+          }
+        }
         if (document.hidden) {
           panel.setStatus('后台标签页：等待恢复');
           return;
@@ -1310,13 +1337,22 @@
           panel.setStatus(`底部刷新中 ${scroller.getBottomBounceRounds()}/${POLICY.maxBottomBounceRounds}`);
         } else if (decision.shouldPause) {
           const completed = totalAnswerCount !== null && answerCount >= totalAnswerCount;
-          pause(completed ? '已完成：已发现全部回答' : '已自动暂停：连续多轮无新回答');
+          complete(
+            completed ? 'completed' : 'idle-timeout',
+            completed ? 'all-answers-found' : 'no-progress',
+            completed ? '已完成：已发现全部回答' : '已自动暂停：连续多轮无新回答'
+          );
         } else {
           panel.setStatus('运行中');
         }
         render();
       } catch (error) {
-        if (error?.name !== 'AbortError') console.warn('[Zhihu Auto Expand] run failed:', error);
+        if (error?.name !== 'AbortError') {
+          completionStatus = 'error';
+          completionReason = error?.message || 'run-failed';
+          console.warn('[Zhihu Auto Expand] run failed:', error);
+          pause('已暂停：运行出错');
+        }
       }
     }
 

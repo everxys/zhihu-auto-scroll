@@ -1,3 +1,78 @@
+# 1.7.9 - 2026-06-17
+
+- `zhihu`、`zhihu login`、`zhihu auth-check`、`zhihu archive` 的命令行 help、运行日志、错误提示和归档摘要统一改为英文输出。
+- `zhihu archive` 的前置上下文继续保持无时间戳，任务阶段、进度、失败和摘要日志继续保留时间戳。
+- `zhihu archive` 默认不再设置 `timeout-ms=600000`；`timeout-ms` 默认显示为 `off`，只有显式传入 `--timeout-ms` 时才限制页面自动展开和 SingleFile 捕获时间。
+- 保留知乎页面中文按钮、弹窗和验证文案识别逻辑，避免影响自动展开和登录态判断。
+
+# 1.7.8 - 2026-06-17
+
+- `zhihu archive` 的阶段日志、失败日志、结果摘要和批量总结统一增加本地时间戳。
+- 进度日志中 `空闲轮次` 只有大于 0 时才显示；`0` 不再展示。
+- `zhihu archive` 和 `zhihu auth-check` 改用一次性临时浏览器 profile，并注入保存的 storageState，避免登录 profile 被残留 Chrome 进程锁住后 DevTools 端口启动失败。
+- `zhihu archive` 开头集中打印任务、URL、目标数量、浏览器和关键参数，并保持无时间戳；后续阶段/进度/错误/摘要日志带时间戳且不再重复问题 ID 和评论开关。
+
+# 1.7.7 - 2026-06-17
+
+- 归档进度日志增加本地时间戳，格式如 `[00:12:34] [286130359] 当前进度：5/504`。
+- 同一个回答进度只输出第一次，不再因为长时间停留在 `5/504` 而重复刷相同日志。
+- 评论模式在每轮开始时增加评论弹窗兜底关闭，处理点击后延迟出现的知乎评论 Modal；原有点击后立即关闭逻辑保留。
+
+# 1.7.6 - 2026-06-17
+
+- 将全局 CLI 收敛为单一入口 `zhihu`，子命令改为 `zhihu login`、`zhihu auth-check`、`zhihu archive`。
+- npm `bin` 不再暴露 `zhihu-login`、`zhihu-auth-check`、`zhihu-archive` 三个分散命令。
+- 更新主命令和子命令 help、错误提示、示例命令，统一使用 `zhihu <command>` 格式。
+
+# 1.7.5 - 2026-06-17
+
+- `zhihu-archive` 的评论展开参数明确为 `--comments`，并新增同义参数 `--open-comments`；开启后第 3 阶段会显示为“滚动展开并打开评论”。
+- 滚动展开阶段增加实时进度输出，周期读取页面脚本 `snapshot.answerCount/totalAnswerCount`，显示形如 `当前进度：1/502`；支持 `--progress-interval-ms` 调整输出间隔。
+- 进度输出会标记评论模式和空闲轮次，长页面归档时不再只停在 `3/6 滚动展开`。
+
+# 1.7.4 - 2026-06-17
+
+- 定位并修复登录后 `zhihu-archive` 仍弹登录窗口的根因：`zhihu-login` 保存的 `.auth/zhihu.storageState.json` 里有 `z_c0`，但原生 Chrome profile 中没有同步持久化该 cookie；归档流程此前只复用 profile，未注入 storageState。
+- `zhihu-archive` 和 `zhihu-auth-check` 现在启动原生 Chrome/Edge 后会先把 `.auth/zhihu.storageState.json` 的 cookies/localStorage 注入到当前浏览器 context，再打开知乎页面。
+- `zhihu-auth-check` 默认改为检查稳定的问题页，并支持 `--url` 指定检查目标，避免知乎首页风控或首页文案导致误判。
+
+# 1.7.3 - 2026-06-17
+
+- `zhihu-archive` 改为复用 `zhihu-login` 创建的原生 Chrome/Edge profile，通过 DevTools 连接真实浏览器会话打开知乎问题页，避免 headless Playwright 触发 `40362 请求存在异常`。
+- 修复原生浏览器会话下 userscript 注入被知乎 CSP 拦截的问题：不再使用 `page.addScriptTag`，改为通过 DevTools evaluate 执行脚本源码。
+- 登录态判断改为先识别真实风控/验证页和登录页，不再把问题页里的普通“登录/注册”文案误判为登录失效。
+- SingleFile 保存阶段会传入系统浏览器可执行文件路径，并默认用可见系统浏览器捕获页面。
+- 自动展开超时和 SingleFile 超时现在分开提示，排查原因更明确。
+
+# 1.7.2 - 2026-06-17
+
+- 将 `zhihu-login` 从 Playwright 控制浏览器改为直接启动本机 Chrome/Edge 可执行文件，并通过临时 DevTools 端口在用户手动登录后读取 storageState，避免知乎登录接口在自动化页面里报 `10001: 请求参数异常，请升级客户端后重试`。
+- `zhihu-login --channel chromium` 现在会直接拒绝并提示使用 Chrome/Edge，避免继续走已知失败路径。
+- 登录专用浏览器资料会保存到当前目录 `.auth/zhihu-login-<browser>-profile`，方便后续重复登录时复用该正常浏览器会话。
+
+# 1.7.1 - 2026-06-17
+
+- 修复 `zhihu-login` 使用 Playwright Chromium 登录知乎时容易触发 `10001: 请求参数异常，请升级客户端后重试` 的问题：登录默认优先启动本机 Google Chrome，其次 Microsoft Edge。
+- `zhihu-login`、`zhihu-auth-check`、`zhihu-archive` 增加 `--channel chrome|msedge|chromium`，必要时可手动指定浏览器。
+- 登录、检查和归档统一使用 `zh-CN`、`Asia/Shanghai`、中文 `Accept-Language` 和固定桌面 viewport，减少知乎把自动化上下文识别成异常客户端的概率。
+
+# 1.7.0 - 2026-06-17
+
+- 增加 npm `bin` 入口，支持全局安装后直接运行 `zhihu-login`、`zhihu-auth-check`、`zhihu-archive`，不再要求进入项目目录执行 `npm run`。
+- 拆分包目录和运行目录：脚本源码、userscript 和 SingleFile 依赖仍从安装包读取，`.auth/`、`archives/`、`test-results/` 会写入当前命令执行目录。
+- 将运行时需要的 `playwright` 和 `single-file-cli` 移到 `dependencies`，避免全局安装后缺少运行依赖。
+- 已在本机执行 `npm link`，并验证项目目录外可直接运行 `zhihu-archive --help`。
+
+# 1.6.0 - 2026-06-16
+
+- 新增 `npm run zhihu:auth:check`，会实际用 `.auth/zhihu.storageState.json` 打开知乎并区分登录态过期、登录跳转和验证码/反爬验证。
+- `npm run zhihu:archive` 增加 `--help`、`--urls-file`、`--debug-dir`，支持批量归档、阶段化进度输出和 debug 产物保存。
+- 归档完成后输出回答数/总回答数、完成状态、自动暂停原因、文件大小、SingleFile 保存耗时和输出路径。
+- 默认归档文件名改为读取页面标题后的 `zhihu-question-<id>-<safe-title>-<timestamp>.html`，并对 Windows 不安全字符和长度做清理限制。
+- 页面自动化 API 新增 `completionStatus` 和 `completionReason`，归档流程现在区分 `completed`、`idle-timeout`、`auth-blocked`、`error`，不再只依赖 `paused`。
+- SingleFile cookies/bootstrap 改为写入唯一 `.auth/zhihu.singlefile.*` 临时目录，并在启动时清理遗留临时目录。
+- 验证通过：`npm run check`、`npm test`、`npm run test:smoke`、`npm run zhihu:archive -- --help`；当前本机 `.auth` 已过期，`npm run zhihu:auth:check` 正确提示重新运行 `npm run zhihu:login`。
+
 # 1.5.0 - 2026-06-16
 
 - 新增 Playwright 登录态脚本：`npm run zhihu:login` 以 headed 模式打开知乎登录页，手动确认后覆盖保存 `.auth/zhihu.storageState.json`。
@@ -5,6 +80,7 @@
 - 归档流程会打开目标问题页、注入当前 `zhihu-auto-scroll.js`、通过自动化开关启动展开/滚动，并将 cookies 与同源 localStorage 转给 SingleFile CLI 的捕获页。
 - 集成官方 `single-file-cli` 保存单文件 HTML 到 `archives/zhihu-question-<id>-<timestamp>.html`；`.auth/` 和 `archives/` 作为本地运行产物加入 `.gitignore`。
 - SingleFile 不能直接读取 Playwright `storageState` 或抓取 Playwright 已滚动的同一 tab；当前采用 cookies/localStorage 转换加 SingleFile 捕获页内再次注入脚本并等待自动化完成的方案。
+- 在 `TODO.md` 记录 Playwright 登录态与归档工作流的后续产品体验和技术可靠性优化项。
 - 验证通过：`npm run check`、`npm test`、`npm run test:smoke`；真实知乎登录和保存需要人工登录，当前环境未执行完整线上归档。
 
 # 1.4.0 - 2026-06-16
