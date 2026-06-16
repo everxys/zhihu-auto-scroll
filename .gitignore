@@ -1,4 +1,6 @@
 .codegraph
+.auth/
+archives/
 node_modules/
 playwright-report/
 test-results/

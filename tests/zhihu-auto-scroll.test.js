@@ -12,7 +12,13 @@ function loadHooks(localStorage = new MapStorage()) {
     localStorage,
     setTimeout,
     clearTimeout,
-    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    innerHeight: 720,
+    getComputedStyle: element => ({
+      display: 'block',
+      visibility: 'visible',
+      opacity: '1',
+      position: element?.testPosition || 'static',
+    }),
   };
   context.window = context;
   const source = fs.readFileSync(path.join(__dirname, '..', 'zhihu-auto-scroll.js'), 'utf8');
@@ -73,21 +79,27 @@ test('extracts stable answer ids for progress deduplication', () => {
   }), '9988');
 });
 
-test('migrates legacy settings and rejects damaged values', () => {
+test('migrates settings and rejects damaged values', () => {
   const { hooks } = loadHooks();
-  const migrated = hooks.migrateSettings(null, {
+  const migrated = hooks.migrateSettings({
     scrollSpeed: '8',
     intervalMs: '1200',
+    expandComments: true,
+    panelExpanded: true,
     position: { left: 12, top: 34 },
+    panelPosition: { left: 56, top: 78 },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(migrated)), {
-    version: 2,
+    version: 4,
     scrollSpeed: 8,
     intervalMs: 1200,
-    panelPosition: { left: 12, top: 34 },
+    expandComments: true,
+    panelExpanded: true,
+    panelPosition: { left: 56, top: 78 },
   });
   const damaged = hooks.migrateSettings({ scrollSpeed: 'x', panelPosition: { left: 'x' } });
   assert.equal(damaged.scrollSpeed, 1);
+  assert.equal(damaged.panelExpanded, false);
   assert.equal(damaged.panelPosition, null);
 });
 
@@ -100,6 +112,7 @@ test('storage adapter survives unavailable storage', () => {
   const settings = hooks.createStorageAdapter().load();
   assert.equal(settings.scrollSpeed, 1);
   assert.equal(settings.intervalMs, 700);
+  assert.equal(settings.panelExpanded, false);
 });
 
 test('matches answer and list targets only inside their allowed containers', () => {
@@ -110,6 +123,43 @@ test('matches answer and list targets only inside their allowed containers', () 
   assert.equal(hooks.classifyTarget(element({ text: '阅读全文', answer: true, excluded: true })), null);
   assert.equal(hooks.classifyTarget(element({ text: '阅读全文', answer: true, disabled: true })), null);
   assert.equal(hooks.classifyTarget(element({ text: '阅读全文' })), null);
+});
+
+test('matches comments only when enabled, at the answer bottom, or inside comments', () => {
+  const { hooks } = loadHooks();
+  const answer = { getBoundingClientRect: () => ({ bottom: 500 }) };
+  const bottomActions = { getBoundingClientRect: () => ({ top: 440, bottom: 480 }) };
+  const floatingActions = { testPosition: 'fixed', getBoundingClientRect: () => ({ top: 440, bottom: 480 }) };
+  const offscreenActions = { getBoundingClientRect: () => ({ top: 900, bottom: 940 }) };
+  const commentButton = actions => ({
+    textContent: '打开 40 条评论',
+    getAttribute: () => null,
+    closest(selector) {
+      if (selector.includes('.AnswerItem')) return answer;
+      if (selector.includes('.ContentItem-actions')) return actions;
+      return null;
+    },
+  });
+  const dialogButton = {
+    ...commentButton(bottomActions),
+    getAttribute(name) {
+      return name === 'aria-haspopup' ? 'dialog' : null;
+    },
+  };
+  const replyButton = {
+    textContent: '展开其他 4 条回复',
+    getAttribute: () => null,
+    closest(selector) {
+      return selector.includes('.Comments-container') ? this : null;
+    },
+  };
+  assert.equal(hooks.classifyTarget(commentButton(bottomActions)), null);
+  assert.equal(hooks.classifyTarget(commentButton(bottomActions), { expandComments: true }), 'comment-entry');
+  assert.equal(hooks.classifyTarget(commentButton(floatingActions), { expandComments: true }), null);
+  assert.equal(hooks.classifyTarget(commentButton(offscreenActions), { expandComments: true }), null);
+  assert.equal(hooks.isKnownDialogCommentTrigger(dialogButton), true);
+  assert.equal(hooks.classifyTarget(dialogButton, { expandComments: true }), null);
+  assert.equal(hooks.classifyTarget(replyButton, { expandComments: true }), 'comment-reply');
 });
 
 test('incremental mutation collection ignores panel changes and returns only added roots', () => {

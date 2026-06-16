@@ -2,11 +2,16 @@
   "name": "zhihu-auto-scroll",
   "private": true,
   "scripts": {
-    "check": "node --check zhihu-auto-scroll.js",
+    "check": "node --check zhihu-auto-scroll.js && node --check scripts/zhihu-automation.js && node --check scripts/zhihu-login.js && node --check scripts/zhihu-archive.js",
     "test": "node --test tests/*.test.js",
-    "test:smoke": "playwright test tests/smoke.spec.js --reporter=line"
+    "test:smoke": "playwright test tests/smoke.spec.js --reporter=line",
+    "zhihu:login": "node scripts/zhihu-login.js",
+    "zhihu:archive": "node scripts/zhihu-archive.js",
+    "zhihu:archive:headed": "node scripts/zhihu-archive.js --headed"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.0"
+    "@playwright/test": "^1.61.0",
+    "playwright": "^1.61.0",
+    "single-file-cli": "^2.0.83"
   }
 }

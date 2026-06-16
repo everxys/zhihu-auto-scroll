@@ -8,7 +8,12 @@
     header, aside, .Comments-container, .AnswerItem { padding: 24px; margin: 12px; border: 1px solid #ccc; }
     aside { position: absolute; right: 0; width: 220px; }
     .Question-mainColumn { width: 700px; min-height: 2600px; }
-    .AnswerItem { min-height: 420px; }
+    .AnswerItem { position: relative; min-height: 420px; }
+    .AnswerItem:first-of-type { min-height: 1000px; }
+    .ContentItem-actions { position: absolute; left: 24px; right: 24px; bottom: 0; padding: 12px 0; }
+    .floating-actions { position: fixed; left: 300px; bottom: 12px; z-index: 2; }
+    [role="dialog"], .css-19q29v6 { position: fixed; inset: 80px; z-index: 10; padding: 24px; background: #fff; border: 2px solid #333; }
+    .Modal-content { padding: 24px; }
   </style>
 </head>
 <body>
@@ -17,7 +22,15 @@
     <section class="Question-mainColumn">
       <div class="QuestionAnswers-answers">
         <div class="List-header"><h4 class="List-headerText"><span>3 个回答</span></h4></div>
-        <article class="AnswerItem" data-zop='{"itemId":"answer-1"}'><button data-answer="1">阅读全文</button></article>
+        <article class="AnswerItem" data-zop='{"itemId":"answer-1"}'>
+          <button data-answer="1">阅读全文</button>
+          <div class="ContentItem-actions floating-actions"><button data-floating-comment>打开 40 条评论</button></div>
+          <div class="ContentItem-actions">
+            <button data-bottom-comment>打开 40 条评论</button>
+            <button data-known-modal-comment aria-haspopup="dialog">打开 8 条评论</button>
+            <button data-unknown-modal-comment>打开 7 条评论</button>
+          </div>
+        </article>
         <button data-load-more="1">加载更多</button>
       </div>
     </section>
@@ -25,7 +38,19 @@
     <section class="Comments-container"><button data-decoy="comment">阅读全文</button></section>
   </main>
   <script>
-    window.smoke = { answerClicks: 0, loadClicks: 0, decoyClicks: 0, scrollBehaviors: [] };
+    window.smoke = {
+      answerClicks: 0,
+      loadClicks: 0,
+      decoyClicks: 0,
+      floatingCommentClicks: 0,
+      bottomCommentClicks: 0,
+      knownModalCommentClicks: 0,
+      unknownModalCommentClicks: 0,
+      closedModalComments: 0,
+      replyExpandClicks: 0,
+      initialCommentAttempts: 0,
+      scrollBehaviors: [],
+    };
     const nativeScrollBy = window.scrollBy.bind(window);
     const nativeScrollTo = window.scrollTo.bind(window);
     window.scrollBy = (...args) => {
@@ -40,15 +65,66 @@
       window.smoke.answerClicks++;
       event.currentTarget.textContent = '收起';
     });
+    document.querySelector('[data-floating-comment]').addEventListener('click', () => {
+      window.smoke.floatingCommentClicks++;
+    });
+    document.querySelector('[data-known-modal-comment]').addEventListener('click', () => {
+      window.smoke.knownModalCommentClicks++;
+    });
+    document.querySelector('[data-unknown-modal-comment]').addEventListener('click', () => {
+      window.smoke.unknownModalCommentClicks++;
+      if (document.querySelector('.Modal-content')) return;
+      const dialog = document.createElement('section');
+      dialog.className = 'css-19q29v6';
+      dialog.innerHTML = '<button type="button" aria-label="关闭">关闭</button><div class="Modal-content css-1svde17"><p>162 条评论 默认最新</p></div>';
+      dialog.querySelector('button').addEventListener('click', () => {
+        window.smoke.closedModalComments++;
+        dialog.remove();
+      });
+      document.body.appendChild(dialog);
+    });
+    document.querySelector('[data-bottom-comment]').addEventListener('click', event => {
+      window.smoke.bottomCommentClicks++;
+      window.smoke.initialCommentAttempts++;
+      if (window.smoke.initialCommentAttempts === 1) return;
+      if (event.currentTarget.closest('.AnswerItem').querySelector('.Comments-container')) return;
+      const comments = document.createElement('section');
+      comments.className = 'Comments-container';
+      comments.innerHTML = `
+        <div class="CommentItemV2">
+          <button data-expand-replies>展开其他 4 条回复</button>
+        </div>`;
+      comments.querySelector('[data-expand-replies]').addEventListener('click', replyEvent => {
+        window.smoke.replyExpandClicks++;
+        const next = document.createElement('button');
+        next.textContent = '展开其他 2 条回复';
+        next.addEventListener('click', nextEvent => {
+          window.smoke.replyExpandClicks++;
+          nextEvent.currentTarget.remove();
+        });
+        replyEvent.currentTarget.replaceWith(next);
+      });
+      event.currentTarget.closest('.AnswerItem').appendChild(comments);
+    });
     document.querySelector('[data-load-more]').addEventListener('click', event => {
       window.smoke.loadClicks++;
       const answer = document.createElement('article');
       answer.className = 'AnswerItem';
       answer.dataset.zop = '{"itemId":"answer-2"}';
-      answer.innerHTML = '<button data-answer="2">阅读全文</button>';
+      answer.innerHTML = `
+        <button data-answer="2">阅读全文</button>
+        <div class="ContentItem-actions"><button data-bottom-comment="2">打开 5 条评论</button></div>`;
       answer.querySelector('button').addEventListener('click', clickEvent => {
         window.smoke.answerClicks++;
         clickEvent.currentTarget.textContent = '收起';
+      });
+      answer.querySelector('[data-bottom-comment="2"]').addEventListener('click', commentEvent => {
+        window.smoke.bottomCommentClicks++;
+        if (commentEvent.currentTarget.closest('.AnswerItem').querySelector('.Comments-container')) return;
+        const comments = document.createElement('section');
+        comments.className = 'Comments-container';
+        comments.textContent = '第二个答案评论';
+        commentEvent.currentTarget.closest('.AnswerItem').appendChild(comments);
       });
       event.currentTarget.before(answer);
       event.currentTarget.remove();
