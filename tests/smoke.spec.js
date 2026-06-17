@@ -1,7 +1,10 @@
 const { test, expect } = require('@playwright/test');
 
-async function gotoQuestion(page) {
-  await page.addInitScript(() => localStorage.setItem('zhihu-auto-expand-debug', '1'));
+async function gotoQuestion(page, options = {}) {
+  await page.addInitScript(automation => {
+    localStorage.setItem('zhihu-auto-expand-debug', '1');
+    if (automation) window.__ZAE_AUTOMATION__ = true;
+  }, options.automation === true);
   await page.goto('http://127.0.0.1:51999/question/123');
   await page.waitForFunction(() => window.zhihuAutoExpand?.snapshot);
 }
@@ -103,6 +106,21 @@ test('automation API drives scrolling without rendering panel controls', async (
   await page.evaluate(() => history.pushState({}, '', '/people/example'));
   await expect(page.locator('#zhihu-auto-expand-panel')).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test('automation mode keeps archive scrolling while the page is hidden', async ({ page }) => {
+  await gotoQuestion(page, { automation: true });
+  await configureApi(page, { scrollSpeed: 16, intervalMs: 200 });
+  await page.evaluate(() => {
+    scrollTo(0, 0);
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await startApi(page);
+
+  await expect.poll(() => page.evaluate(() => window.zhihuAutoExpand.snapshot.status), { timeout: 5000 })
+    .not.toBe('后台标签页：等待恢复');
+  await expect.poll(() => page.evaluate(() => scrollY), { timeout: 12000 }).toBeGreaterThan(0);
 });
 
 test('comment mode avoids repeated full action scans on long pages', async ({ page }) => {

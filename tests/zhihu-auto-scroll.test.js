@@ -217,6 +217,13 @@ test('comment append waiting yields to page scrolling after bounded rounds', () 
   }), false);
 });
 
+test('hidden documents suspend only outside automation mode', () => {
+  const { hooks } = loadHooks();
+  assert.equal(hooks.shouldSuspendForHidden(true, false), true);
+  assert.equal(hooks.shouldSuspendForHidden(true, true), false);
+  assert.equal(hooks.shouldSuspendForHidden(false, false), false);
+});
+
 test('scheduler interval is measured from the previous run start', () => {
   const { hooks } = loadHooks();
   assert.equal(hooks.getNextScheduleDelay(200, 80), 120);

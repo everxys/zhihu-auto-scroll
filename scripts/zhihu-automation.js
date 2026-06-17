@@ -18,6 +18,12 @@ const DEFAULT_SETTLE_MS = 1500;
 const SINGLE_FILE_WRITE_CHUNK_SIZE = 1024 * 1024;
 const DEFAULT_VIEWPORT = { width: 1280, height: 900 };
 const SYSTEM_BROWSER_CHANNELS = ['chrome', 'msedge'];
+const DISABLE_BACKGROUND_THROTTLING_ARGS = [
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-features=CalculateNativeWinOcclusion',
+];
 const BROWSER_CANDIDATES = {
   chrome: [
     ['LOCALAPPDATA', 'Google\\Chrome\\Application\\chrome.exe'],
@@ -224,6 +230,7 @@ async function launchNativeBrowserSession(options = {}) {
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-popup-blocking',
+    ...DISABLE_BACKGROUND_THROTTLING_ARGS,
   ];
   if (options.url) {
     args.push('--new-window', options.url);

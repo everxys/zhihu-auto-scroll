@@ -357,6 +357,10 @@
     );
   }
 
+  function shouldSuspendForHidden(hidden, automation = global.__ZAE_AUTOMATION__ === true) {
+    return Boolean(hidden && !automation);
+  }
+
   function getNextScheduleDelay(targetInterval, elapsed) {
     return Math.max(0, targetInterval - elapsed);
   }
@@ -376,6 +380,7 @@
     collectAddedRoots,
     getIdleDecision,
     shouldWaitForCommentAppend,
+    shouldSuspendForHidden,
     getNextScheduleDelay,
     abortableSleep,
     POLICY,
@@ -850,7 +855,7 @@
         await task;
       } finally {
         task = null;
-        if (valid(signal) && !document.hidden) {
+        if (valid(signal) && !shouldSuspendForHidden(document.hidden)) {
           const targetDelay = runSoonAfterTask ? POLICY.mutationRunDelayMs : settings.intervalMs;
           const delay = getNextScheduleDelay(targetDelay, Date.now() - startedAt);
           runSoonAfterTask = false;
@@ -870,7 +875,7 @@
 
     function handleVisibilityChange() {
       if (state !== 'running') return;
-      if (document.hidden) {
+      if (shouldSuspendForHidden(document.hidden)) {
         clearTimeout(scheduled);
         scheduled = null;
         app.renderVisibilityStatus(true);
@@ -989,7 +994,7 @@
     async function runOnce(signal) {
       try {
         throwIfAborted(signal);
-        if (document.hidden) {
+        if (shouldSuspendForHidden(document.hidden)) {
           runtimeStatus.setStatus('后台标签页：等待恢复');
           return;
         }
@@ -1008,7 +1013,7 @@
             return;
           }
         }
-        if (document.hidden) {
+        if (shouldSuspendForHidden(document.hidden)) {
           runtimeStatus.setStatus('后台标签页：等待恢复');
           return;
         }
@@ -1037,7 +1042,7 @@
           }
           scrollChanged = await scroller.scrollPage(signal);
         }
-        if (document.hidden) {
+        if (shouldSuspendForHidden(document.hidden)) {
           runtimeStatus.setStatus('后台标签页：等待恢复');
           return;
         }
