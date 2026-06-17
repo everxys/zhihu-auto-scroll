@@ -1,3 +1,31 @@
+# 1.7.14 - 2026-06-17
+
+- 移除页面上的知乎展开控制面板、展开小按钮、隐藏按钮、拖动逻辑和相关样式；userscript 不再向页面插入任何控制按钮。
+- 自动展开仍通过 `window.zhihuAutoExpand` 自动化 API 由 Playwright 调用，`snapshot.status` 保留运行状态，速度、间隔和评论开关继续支持脚本配置。
+- Playwright 冒烟测试改为直接调用自动化 API，并新增断言确认页面不存在旧面板和按钮。
+
+# 1.7.13 - 2026-06-17
+
+- `zhihu archive --url` 现在支持 `https://www.zhihu.com/question/<id>/answer/<answer-id>` 格式，会自动归一化为对应的问题页 URL。
+- 增加 answer URL 解析测试，确保归档目标不会保留 `/answer/...` 路径。
+
+# 1.7.12 - 2026-06-17
+
+- 修复归档 HTML 在浏览器中打开后可能自动刷新/跳转的问题：SingleFile 保存阶段强制阻断页面脚本，并插入 CSP，让输出文件保持静态归档。
+- 增加 SingleFile 保存参数测试，防止后续误把 `blockScripts` 或 `insertMetaCSP` 关掉。
+
+# 1.7.11 - 2026-06-17
+
+- 修复 `zhihu archive --comments` 可能长期停在首批回答进度的问题：评论展开等待现在有上限，超过后会继续页面滚动，避免阻塞知乎加载后续回答。
+- 回答进度统计在每轮归档循环结束前会重新扫描当前 DOM，并按回答 ID 去重，避免 MutationObserver 漏掉已加载回答时进度滞后。
+- 增加回答节点收集和评论等待让出滚动的单元测试。
+
+# 1.7.10 - 2026-06-17
+
+- 默认归档文件名改为 `archives/<question-title>.html`，不再包含 `zhihu-question`、问题 ID 和时间戳。
+- 归档标题会清理知乎页签里的私信/消息前缀，例如 `(81 封私信 / 9 条消息)`，只保留问题标题。
+- `zhihu archive` 第 5 步改为在当前已展开页面内直接运行 SingleFile 并分块写入 HTML，不再重新打开第二个页面、重复滚动展开或因为第二轮展开看起来卡住。
+
 # 1.7.9 - 2026-06-17
 
 - `zhihu`、`zhihu login`、`zhihu auth-check`、`zhihu archive` 的命令行 help、运行日志、错误提示和归档摘要统一改为英文输出。

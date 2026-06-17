@@ -7,26 +7,23 @@ const {
   PACKAGE_DIR,
   ROOT_DIR,
   DEFAULT_TIMEOUT_MS,
-  MAX_TIMER_DELAY_MS,
   parseArgs,
   parseQuestionUrl,
   questionIdFromUrl,
   parseQuestionUrlsFromFile,
   timestampForFilename,
   safeTitleForFilename,
+  cleanArchiveTitle,
   defaultArchivePath,
   formatBytes,
   formatAutomationProgress,
   classifyArchiveError,
   toPositiveInt,
-  toSingleFileMaxTime,
   normalizeBrowserChannel,
   browserChannelLabel,
   zhihuContextOptions,
   hydrateContextFromStorageState,
-  normalizeCookiesForSingleFile,
-  getLocalStorageEntries,
-  writeSingleFileBootstrap,
+  savePageWithSingleFile,
 } = require('../scripts/zhihu-automation');
 
 test('keeps package assets separate from the runtime working directory', () => {
@@ -68,6 +65,10 @@ test('accepts only zhihu question URLs', () => {
     href: 'https://www.zhihu.com/question/123?sort=created',
     id: '123',
   });
+  assert.deepEqual(parseQuestionUrl('https://www.zhihu.com/question/33028679/answer/1962058612538081786'), {
+    href: 'https://www.zhihu.com/question/33028679',
+    id: '33028679',
+  });
   assert.equal(questionIdFromUrl('https://www.zhihu.com/question/456/answer/789'), '456');
   assert.throws(() => parseQuestionUrl('https://example.com/question/123'), /Only/);
   assert.throws(() => parseQuestionUrl('https://www.zhihu.com/people/example'), /question URLs/);
@@ -77,13 +78,18 @@ test('builds safe default archive filenames', () => {
   const date = new Date('2026-06-16T12:34:56.789Z');
   assert.equal(timestampForFilename(date), '2026-06-16T12-34-56Z');
   assert.equal(safeTitleForFilename(' 问题 / 标题：A? B '), '问题-标题-A-B');
+  assert.equal(cleanArchiveTitle('(81 封私信 / 9 条消息) 你见过哪些令人拍案叫绝的科幻设定 - 知乎'), '你见过哪些令人拍案叫绝的科幻设定');
   assert.equal(
     path.basename(defaultArchivePath('123', date)),
-    'zhihu-question-123-2026-06-16T12-34-56Z.html'
+    '123.html'
   );
   assert.equal(
     path.basename(defaultArchivePath('123', date, '如何看待知乎自动展开？ - 知乎')),
-    'zhihu-question-123-如何看待知乎自动展开-知乎-2026-06-16T12-34-56Z.html'
+    '如何看待知乎自动展开.html'
+  );
+  assert.equal(
+    path.basename(defaultArchivePath('286130359', date, '(81 封私信 / 9 条消息) 你见过哪些令人拍案叫绝的科幻设定 - 知乎')),
+    '你见过哪些令人拍案叫绝的科幻设定.html'
   );
 });
 
@@ -112,19 +118,6 @@ test('uses no archive timeout by default', () => {
   assert.equal(DEFAULT_TIMEOUT_MS, 0);
   assert.equal(toPositiveInt(undefined, DEFAULT_TIMEOUT_MS), 0);
   assert.equal(toPositiveInt('0', 123), 0);
-  assert.equal(toSingleFileMaxTime(undefined), MAX_TIMER_DELAY_MS);
-  assert.equal(toSingleFileMaxTime(0), MAX_TIMER_DELAY_MS);
-  assert.equal(toSingleFileMaxTime(7000), 7000);
-});
-
-test('singlefile bootstrap treats timeout 0 as no limit', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zhihu-bootstrap-'));
-  const file = path.join(dir, 'bootstrap.js');
-  writeSingleFileBootstrap(file, {});
-  const source = fs.readFileSync(file, 'utf8');
-  assert.match(source, /"timeoutMs":0/);
-  assert.match(source, /timeout > 0 && Date\.now\(\) - startedAt > timeout/);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('hydrates native browser context from saved storage state', async () => {
@@ -145,33 +138,35 @@ test('hydrates native browser context from saved storage state', async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('converts Playwright storage state for SingleFile inputs', () => {
-  const cookies = normalizeCookiesForSingleFile([{
-    name: 'z_c0',
-    value: 'token',
-    domain: '.zhihu.com',
-    path: '/',
-    expires: -1,
-    httpOnly: true,
-    secure: true,
-    sameSite: 'None',
-  }]);
-  assert.deepEqual(cookies, [{
-    name: 'z_c0',
-    value: 'token',
-    domain: '.zhihu.com',
-    path: '/',
-    secure: true,
-    httpOnly: true,
-    sameSite: 'None',
-  }]);
-
-  const state = {
-    origins: [{
-      origin: 'https://www.zhihu.com',
-      localStorage: [{ name: 'theme', value: 'dark' }],
-    }],
+test('saves static SingleFile output with scripts blocked', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zhihu-singlefile-'));
+  const output = path.join(dir, 'archive.html');
+  const exposed = {};
+  let capturedOptions = null;
+  const page = {
+    async exposeFunction(name, callback) {
+      exposed[name] = callback;
+    },
+    async evaluate(callback, value) {
+      if (value?.singleFileOptions) {
+        capturedOptions = value.singleFileOptions;
+        await exposed[value.bindingName]('<html><body>saved</body></html>');
+        return { contentLength: 30 };
+      }
+      return undefined;
+    },
   };
-  assert.deepEqual(getLocalStorageEntries(state, 'https://www.zhihu.com'), [{ name: 'theme', value: 'dark' }]);
-  assert.deepEqual(getLocalStorageEntries(state, 'https://zhuanlan.zhihu.com'), []);
+
+  const result = await savePageWithSingleFile(page, output, {
+    singleFileOptions: {
+      blockScripts: false,
+      insertMetaCSP: false,
+    },
+  });
+
+  assert.equal(capturedOptions.blockScripts, true);
+  assert.equal(capturedOptions.insertMetaCSP, true);
+  assert.equal(fs.readFileSync(output, 'utf8'), '<html><body>saved</body></html>');
+  assert.equal(result.contentLength, 30);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

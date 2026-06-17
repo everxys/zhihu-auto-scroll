@@ -48,7 +48,7 @@ function element({ text, answer = false, list = false, excluded = false, disable
       return null;
     },
     closest(selector) {
-      if (selector.includes('#zhihu-auto-expand-panel') && excluded) return this;
+      if (selector.includes('.Question-sideColumn') && excluded) return this;
       if (selector.includes('.AnswerItem') && answer) return this;
       if (selector.includes('.QuestionAnswers-answers') && list) return this;
       return null;
@@ -79,6 +79,21 @@ test('extracts stable answer ids for progress deduplication', () => {
   }), '9988');
 });
 
+test('collects current answer elements from the scanned DOM root', () => {
+  const { hooks } = loadHooks();
+  const first = { name: 'first' };
+  const second = { name: 'second' };
+  const root = {
+    matches: selector => selector.includes('.AnswerItem'),
+    querySelectorAll: selector => selector.includes('.AnswerItem') ? [first, second] : [],
+  };
+  const answers = hooks.collectAnswerElements(root);
+  assert.equal(answers.length, 3);
+  assert.equal(answers[0], root);
+  assert.equal(answers[1], first);
+  assert.equal(answers[2], second);
+});
+
 test('migrates settings and rejects damaged values', () => {
   const { hooks } = loadHooks();
   const migrated = hooks.migrateSettings({
@@ -86,21 +101,18 @@ test('migrates settings and rejects damaged values', () => {
     intervalMs: '1200',
     expandComments: true,
     panelExpanded: true,
-    position: { left: 12, top: 34 },
     panelPosition: { left: 56, top: 78 },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(migrated)), {
-    version: 4,
+    version: 5,
     scrollSpeed: 8,
     intervalMs: 1200,
     expandComments: true,
-    panelExpanded: true,
-    panelPosition: { left: 56, top: 78 },
   });
   const damaged = hooks.migrateSettings({ scrollSpeed: 'x', panelPosition: { left: 'x' } });
   assert.equal(damaged.scrollSpeed, 1);
-  assert.equal(damaged.panelExpanded, false);
-  assert.equal(damaged.panelPosition, null);
+  assert.equal(Object.hasOwn(damaged, 'panelExpanded'), false);
+  assert.equal(Object.hasOwn(damaged, 'panelPosition'), false);
 });
 
 test('storage adapter survives unavailable storage', () => {
@@ -112,7 +124,7 @@ test('storage adapter survives unavailable storage', () => {
   const settings = hooks.createStorageAdapter().load();
   assert.equal(settings.scrollSpeed, 1);
   assert.equal(settings.intervalMs, 700);
-  assert.equal(settings.panelExpanded, false);
+  assert.equal(Object.hasOwn(settings, 'panelExpanded'), false);
 });
 
 test('matches answer and list targets only inside their allowed containers', () => {
@@ -162,12 +174,12 @@ test('matches comments only when enabled, at the answer bottom, or inside commen
   assert.equal(hooks.classifyTarget(replyButton, { expandComments: true }), 'comment-reply');
 });
 
-test('incremental mutation collection ignores panel changes and returns only added roots', () => {
+test('incremental mutation collection ignores excluded layout changes and returns only added roots', () => {
   const { hooks } = loadHooks();
   const answer = element({ answer: true });
-  const panelChild = element({ excluded: true });
+  const excludedChild = element({ excluded: true });
   const textNode = { nodeType: 3 };
-  const roots = hooks.collectAddedRoots([{ addedNodes: [answer, panelChild, textNode] }]);
+  const roots = hooks.collectAddedRoots([{ addedNodes: [answer, excludedChild, textNode] }]);
   assert.equal(roots.length, 1);
   assert.equal(roots[0], answer);
 });
@@ -187,6 +199,22 @@ test('idle decision treats newly discovered answers as progress', () => {
   });
   assert.equal(progress.shouldPause, false);
   assert.equal(progress.idleRounds, 0);
+});
+
+test('comment append waiting yields to page scrolling after bounded rounds', () => {
+  const { hooks } = loadHooks();
+  assert.equal(hooks.shouldWaitForCommentAppend({
+    waitingForComments: true,
+    commentWaitRounds: 0,
+  }), true);
+  assert.equal(hooks.shouldWaitForCommentAppend({
+    waitingForComments: true,
+    commentWaitRounds: hooks.POLICY.maxCommentWaitRoundsBeforeScroll,
+  }), false);
+  assert.equal(hooks.shouldWaitForCommentAppend({
+    waitingForComments: false,
+    commentWaitRounds: 0,
+  }), false);
 });
 
 test('scheduler interval is measured from the previous run start', () => {

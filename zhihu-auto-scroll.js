@@ -2,7 +2,7 @@
 // @name         Zhihu Auto Expand All Answers
 // @namespace    https://everxys.local/
 // @version      1.4.0
-// @description  自动展开知乎回答和评论回复，支持可取消滚动、增量处理、底部刷新、累计滚动时长和拖动面板
+// @description  自动展开知乎回答和评论回复，支持 Playwright 自动化调用、可取消滚动、增量处理和底部刷新
 // @author       everxys
 // @match        https://www.zhihu.com/question/*
 // @run-at       document-idle
@@ -13,8 +13,7 @@
   'use strict';
 
   const STORAGE_KEY = 'zhihu-auto-expand-settings';
-  const SETTINGS_VERSION = 4;
-  const PANEL_ID = 'zhihu-auto-expand-panel';
+  const SETTINGS_VERSION = 5;
   const SPEED_MIN = 0.5;
   const SPEED_MAX = 16;
   const INTERVAL_MIN = 200;
@@ -24,8 +23,6 @@
     scrollSpeed: 1,
     intervalMs: 700,
     expandComments: false,
-    panelExpanded: false,
-    panelPosition: null,
   });
   const POLICY = Object.freeze({
     bottomThresholdPx: 180,
@@ -43,14 +40,14 @@
     progressStepDelayMs: 80,
     maxBottomBounceRounds: 8,
     maxIdleRounds: 10,
+    maxCommentWaitRoundsBeforeScroll: 2,
   });
   const ANSWER_SELECTOR =
     '.AnswerItem, .QuestionAnswer-content, .List-item[data-za-detail-view-path-module="AnswerItem"]';
   const ANSWER_LIST_SELECTOR =
     '.QuestionAnswers-answers, .Question-mainColumn .List, .Question-mainColumn';
   const QUESTION_ROOT_SELECTOR = '.Question-main, [data-zop-question-id]';
-  const EXCLUDED_SELECTOR =
-    `#${PANEL_ID}, .Question-sideColumn, header`;
+  const EXCLUDED_SELECTOR = '.Question-sideColumn, header';
   const CANDIDATE_SELECTOR = 'button, a, [role="button"]';
   const ANSWER_ACTIONS_SELECTOR = '.ContentItem-actions';
   const COMMENT_CONTAINER_SELECTOR =
@@ -97,13 +94,6 @@
       .trim();
   }
 
-  function normalizePosition(position) {
-    if (!position || !Number.isFinite(position.left) || !Number.isFinite(position.top)) {
-      return null;
-    }
-    return { left: position.left, top: position.top };
-  }
-
   function parseTotalAnswerCount(text) {
     const match = normalizeText(text).match(/^([\d,，]+)个回答/);
     if (!match) return null;
@@ -130,6 +120,13 @@
     return href.match(/\/answer\/(\d+)/)?.[1] || null;
   }
 
+  function collectAnswerElements(root) {
+    const answers = [];
+    if (root?.matches?.(ANSWER_SELECTOR)) answers.push(root);
+    root?.querySelectorAll?.(ANSWER_SELECTOR).forEach(answer => answers.push(answer));
+    return answers;
+  }
+
   function migrateSettings(raw) {
     const source = raw && typeof raw === 'object' ? raw : {};
     return {
@@ -137,9 +134,6 @@
       scrollSpeed: clampScrollSpeed(source.scrollSpeed),
       intervalMs: clampIntervalMs(source.intervalMs),
       expandComments: source.expandComments === true,
-      // Default collapsed on first install; once the user opens it, localStorage keeps that choice.
-      panelExpanded: source.panelExpanded === true,
-      panelPosition: normalizePosition(source.panelPosition),
     };
   }
 
@@ -356,6 +350,13 @@
     return { idleRounds, shouldPause: idleRounds >= POLICY.maxIdleRounds, waitForBottom: false };
   }
 
+  function shouldWaitForCommentAppend(input) {
+    return Boolean(
+      input.waitingForComments &&
+        input.commentWaitRounds < POLICY.maxCommentWaitRoundsBeforeScroll
+    );
+  }
+
   function getNextScheduleDelay(targetInterval, elapsed) {
     return Math.max(0, targetInterval - elapsed);
   }
@@ -367,12 +368,14 @@
     migrateSettings,
     parseTotalAnswerCount,
     getAnswerId,
+    collectAnswerElements,
     createStorageAdapter,
     classifyTarget,
     isBottomAnswerCommentTarget,
     isKnownDialogCommentTrigger,
     collectAddedRoots,
     getIdleDecision,
+    shouldWaitForCommentAppend,
     getNextScheduleDelay,
     abortableSleep,
     POLICY,
@@ -386,125 +389,12 @@
   const storage = createStorageAdapter();
   const settings = storage.load();
 
-  const panel = (() => {
-    let root = null;
-    let style = null;
-    let refs = null;
-    let events = null;
+  const runtimeStatus = (() => {
+    let text = '未开始';
     let timerDisplay = null;
-    let progressDisplay = null;
-    let displayedAnswerCount = null;
-    let targetAnswerCount = 0;
-    let progressTotal = '?';
-    let statusText = '未开始';
-    let lastRender = {};
 
-    function formatDuration(ms) {
-      const totalSeconds = Math.floor(ms / 1000);
-      return [
-        Math.floor(totalSeconds / 3600),
-        Math.floor((totalSeconds % 3600) / 60),
-        totalSeconds % 60,
-      ]
-        .map(value => String(value).padStart(2, '0'))
-        .join(':');
-    }
-
-    function clampPosition(left, top) {
-      return {
-        left: Math.max(0, Math.min(left, global.innerWidth - root.offsetWidth)),
-        top: Math.max(0, Math.min(top, global.innerHeight - root.offsetHeight)),
-      };
-    }
-
-    function moveTo(left, top) {
-      if (!root) return;
-      const position = clampPosition(left, top);
-      Object.assign(root.style, {
-        left: `${position.left}px`,
-        top: `${position.top}px`,
-        right: 'auto',
-        bottom: 'auto',
-        transform: 'none',
-      });
-    }
-
-    function keepInViewport() {
-      if (!root) return;
-      const rect = root.getBoundingClientRect();
-      moveTo(rect.left, rect.top);
-    }
-
-    function updateProgress(answerCount, totalAnswerCount) {
-      targetAnswerCount = answerCount;
-      progressTotal = totalAnswerCount ?? '?';
-      if (displayedAnswerCount === null || answerCount < displayedAnswerCount) {
-        clearTimeout(progressDisplay);
-        progressDisplay = null;
-        displayedAnswerCount = answerCount;
-      }
-      refs.progress.textContent = `${displayedAnswerCount}/${progressTotal}`;
-      if (displayedAnswerCount >= targetAnswerCount || progressDisplay) return;
-      progressDisplay = setTimeout(function advanceProgress() {
-        progressDisplay = null;
-        if (!refs || displayedAnswerCount >= targetAnswerCount) return;
-        displayedAnswerCount++;
-        refs.progress.textContent = `${displayedAnswerCount}/${progressTotal}`;
-        if (displayedAnswerCount < targetAnswerCount) {
-          progressDisplay = setTimeout(advanceProgress, POLICY.progressStepDelayMs);
-        }
-      }, POLICY.progressStepDelayMs);
-    }
-
-    function render(snapshot) {
-      if (!refs) return;
-      const next = {
-        state: snapshot.state,
-        speed: snapshot.scrollSpeed,
-        interval: snapshot.intervalMs,
-        expandComments: snapshot.expandComments,
-        panelExpanded: snapshot.panelExpanded,
-        duration: formatDuration(snapshot.totalScrollMs),
-        status: statusText,
-      };
-      if (next.panelExpanded !== lastRender.panelExpanded) {
-        root.classList.toggle('is-collapsed', !next.panelExpanded);
-        refs.openPanel.setAttribute('aria-expanded', String(next.panelExpanded));
-        refs.hidePanel.setAttribute('aria-expanded', String(next.panelExpanded));
-        keepInViewport();
-        requestAnimationFrame(keepInViewport);
-      }
-      if (next.state !== lastRender.state) {
-        refs.start.disabled = next.state === 'running';
-        refs.pause.disabled = next.state !== 'running';
-      }
-      if (next.speed !== lastRender.speed) {
-        refs.speedRange.value = String(next.speed);
-        refs.speedValue.textContent = `${next.speed.toFixed(1)}x`;
-        refs.speedPresets.forEach(button =>
-          button.classList.toggle('is-active', Number(button.dataset.speed) === next.speed)
-        );
-      }
-      if (next.interval !== lastRender.interval) {
-        refs.intervalRange.value = String(next.interval);
-        refs.intervalValue.textContent = `${next.interval}ms`;
-        refs.intervalPresets.forEach(button =>
-          button.classList.toggle('is-active', Number(button.dataset.interval) === next.interval)
-        );
-      }
-      if (next.expandComments !== lastRender.expandComments) {
-        refs.commentToggle.setAttribute('aria-pressed', String(next.expandComments));
-        refs.commentToggle.textContent = next.expandComments ? '展开评论：开' : '展开评论：关';
-        refs.commentToggle.classList.toggle('is-active', next.expandComments);
-      }
-      if (next.duration !== lastRender.duration) refs.timer.textContent = next.duration;
-      updateProgress(snapshot.answerCount, snapshot.totalAnswerCount);
-      if (next.status !== lastRender.status) refs.status.textContent = next.status;
-      lastRender = next;
-    }
-
-    function setStatus(text) {
-      statusText = text;
+    function setStatus(nextText) {
+      text = nextText;
       app.render();
     }
 
@@ -518,206 +408,12 @@
       app.render();
     }
 
-    function bindDragHandle(handle, options = {}) {
-      let dragging = false;
-      let pointerDown = false;
-      let offsetX = 0;
-      let offsetY = 0;
-      let startX = 0;
-      let startY = 0;
-      handle.addEventListener(
-        'pointerdown',
-        event => {
-          if (options.ignoreButtonTarget && event.target?.closest?.('button')) return;
-          pointerDown = true;
-          dragging = false;
-          startX = event.clientX;
-          startY = event.clientY;
-          handle.setPointerCapture?.(event.pointerId);
-          const rect = root.getBoundingClientRect();
-          offsetX = event.clientX - rect.left;
-          offsetY = event.clientY - rect.top;
-          moveTo(rect.left, rect.top);
-        },
-        { signal: events.signal }
-      );
-      handle.addEventListener(
-        'pointermove',
-        event => {
-          if (!pointerDown) return;
-          if (!dragging && Math.hypot(event.clientX - startX, event.clientY - startY) < 4) return;
-          dragging = true;
-          if (dragging) moveTo(event.clientX - offsetX, event.clientY - offsetY);
-          event.preventDefault();
-        },
-        { signal: events.signal }
-      );
-      handle.addEventListener(
-        'pointerup',
-        event => {
-          if (!pointerDown) return;
-          pointerDown = false;
-          handle.releasePointerCapture?.(event.pointerId);
-          if (!dragging) return;
-          dragging = false;
-          const rect = root.getBoundingClientRect();
-          settings.panelPosition = { left: rect.left, top: rect.top };
-          storage.save(settings);
-          options.onDragged?.();
-          event.preventDefault();
-        },
-        { signal: events.signal }
-      );
-    }
-
-    function bindDrag() {
-      let suppressOpenClick = false;
-      let suppressOpenClickTimer = null;
-      bindDragHandle(refs.title, { ignoreButtonTarget: true });
-      bindDragHandle(refs.openPanel, {
-        onDragged: () => {
-          suppressOpenClick = true;
-          clearTimeout(suppressOpenClickTimer);
-          suppressOpenClickTimer = setTimeout(() => {
-            suppressOpenClick = false;
-            suppressOpenClickTimer = null;
-          }, 0);
-        },
-      });
-      refs.openPanel.addEventListener('click', event => {
-        if (!suppressOpenClick) return;
-        suppressOpenClick = false;
-        clearTimeout(suppressOpenClickTimer);
-        suppressOpenClickTimer = null;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      }, { signal: events.signal, capture: true });
-    }
-
-    function panelTemplate() {
-      return `
-        <button type="button" class="zae-open-panel" aria-label="打开知乎展开面板" aria-expanded="false">展</button>
-        <div class="zae-panel-body">
-          <div class="zae-title">
-            <span>知乎展开</span>
-            <button type="button" class="zae-hide-panel" aria-label="隐藏知乎展开面板" aria-expanded="true">隐藏</button>
-          </div>
-          <div class="zae-status" aria-live="polite">未开始</div>
-          <div class="zae-progress">已发现回答 <strong class="zae-progress-value">0/?</strong></div>
-          <div class="zae-timer">累计滚动 <span class="zae-timer-value">00:00:00</span></div>
-          <button type="button" class="zae-start">开始</button>
-          <button type="button" class="zae-pause">暂停</button>
-          <button type="button" class="zae-comment-toggle" aria-pressed="false">展开评论：关</button>
-          <div class="zae-section">
-            <label class="zae-section-head" for="zae-speed-range">
-              <span>滚动速度</span><span class="zae-speed-value">1.0x</span>
-            </label>
-            <input id="zae-speed-range" class="zae-speed-range" type="range" min="0.5" max="16" step="0.5">
-            <div class="zae-presets zae-speed-presets">
-              ${[1, 2, 4, 8, 16].map(value => `<button type="button" data-speed="${value}">${value}x</button>`).join('')}
-            </div>
-          </div>
-          <div class="zae-section">
-            <label class="zae-section-head" for="zae-interval-range">
-              <span>执行间隔</span><span class="zae-interval-value">700ms</span>
-            </label>
-            <input id="zae-interval-range" class="zae-interval-range" type="range" min="200" max="3000" step="100">
-            <div class="zae-presets zae-interval-presets">
-              ${[300, 700, 1200, 2000].map(value => `<button type="button" data-interval="${value}">${value}</button>`).join('')}
-            </div>
-          </div>
-        </div>`;
-    }
-
-    function panelStyles() {
-      return `
-        #${PANEL_ID}{position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:999999;width:176px;padding:10px;border-radius:12px;background:rgba(255,255,255,.96);box-shadow:0 4px 18px rgba(0,0,0,.2);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111;user-select:none}
-        #${PANEL_ID}.is-collapsed{width:auto;padding:0;border-radius:999px;background:transparent;box-shadow:none}
-        #${PANEL_ID}.is-collapsed .zae-panel-body{display:none}
-        #${PANEL_ID} .zae-open-panel{display:none;width:44px;height:44px;border-radius:999px;background:#2563eb;color:#fff;box-shadow:0 4px 18px rgba(0,0,0,.22);font-size:16px;touch-action:none}
-        #${PANEL_ID}.is-collapsed .zae-open-panel{display:block}
-        #${PANEL_ID} .zae-title{display:flex;align-items:center;justify-content:space-between;font-weight:700;margin-bottom:6px;cursor:move;touch-action:none}
-        #${PANEL_ID} .zae-hide-panel{padding:3px 6px;border-radius:6px;background:#f3f4f6;color:#4b5563;font-size:11px}
-        #${PANEL_ID} .zae-status,#${PANEL_ID} .zae-progress,#${PANEL_ID} .zae-timer{font-size:12px;text-align:center;margin-bottom:6px;line-height:1.4}
-        #${PANEL_ID} .zae-status{color:#666;min-height:17px}#${PANEL_ID} .zae-timer{color:#333;padding:4px 6px;border-radius:6px;background:rgba(37,99,235,.08)}
-        #${PANEL_ID} .zae-progress-value,#${PANEL_ID} .zae-timer-value,#${PANEL_ID} .zae-section-head span:last-child{font-weight:700;color:#2563eb}
-        #${PANEL_ID} button{border:0;cursor:pointer;font-weight:600}#${PANEL_ID} button:disabled{opacity:.45;cursor:not-allowed}
-        #${PANEL_ID} .zae-start,#${PANEL_ID} .zae-pause{width:100%;margin-top:6px;padding:7px 8px;border-radius:7px;font-size:12px;color:#fff}
-        #${PANEL_ID} .zae-start{background:#16a34a}#${PANEL_ID} .zae-pause{background:#f59e0b}
-        #${PANEL_ID} .zae-comment-toggle{width:100%;margin-top:6px;padding:7px 8px;border-radius:7px;font-size:12px;background:#e5e7eb;color:#374151}
-        #${PANEL_ID} .zae-comment-toggle.is-active{background:#2563eb;color:#fff}
-        #${PANEL_ID} .zae-section{margin-top:10px;padding-top:8px;border-top:1px solid rgba(0,0,0,.08)}
-        #${PANEL_ID} .zae-section-head{display:flex;justify-content:space-between;font-size:12px;color:#333;margin-bottom:4px}
-        #${PANEL_ID} input{width:100%;cursor:pointer}#${PANEL_ID} .zae-presets{display:grid;gap:4px;margin-top:6px}
-        #${PANEL_ID} .zae-speed-presets{grid-template-columns:repeat(5,1fr)}#${PANEL_ID} .zae-interval-presets{grid-template-columns:repeat(4,1fr)}
-        #${PANEL_ID} .zae-presets button{padding:5px 0;border-radius:6px;background:#e5e7eb;color:#374151;font-size:11px}
-        #${PANEL_ID} .zae-presets button.is-active{background:#2563eb;color:#fff}`;
-    }
-
-    function create() {
-      if (root || !document.body) return;
-      events = new AbortController();
-      root = document.createElement('section');
-      root.id = PANEL_ID;
-      root.setAttribute('aria-label', '知乎自动展开控制');
-      root.innerHTML = panelTemplate();
-      style = document.createElement('style');
-      style.textContent = panelStyles();
-      document.documentElement.appendChild(style);
-      document.body.appendChild(root);
-      refs = {
-        openPanel: root.querySelector('.zae-open-panel'),
-        hidePanel: root.querySelector('.zae-hide-panel'),
-        title: root.querySelector('.zae-title'),
-        status: root.querySelector('.zae-status'),
-        progress: root.querySelector('.zae-progress-value'),
-        timer: root.querySelector('.zae-timer-value'),
-        start: root.querySelector('.zae-start'),
-        pause: root.querySelector('.zae-pause'),
-        commentToggle: root.querySelector('.zae-comment-toggle'),
-        speedRange: root.querySelector('.zae-speed-range'),
-        speedValue: root.querySelector('.zae-speed-value'),
-        speedPresets: [...root.querySelectorAll('[data-speed]')],
-        intervalRange: root.querySelector('.zae-interval-range'),
-        intervalValue: root.querySelector('.zae-interval-value'),
-        intervalPresets: [...root.querySelectorAll('[data-interval]')],
-      };
-      refs.openPanel.addEventListener('click', () => app.setPanelExpanded(true), { signal: events.signal });
-      refs.hidePanel.addEventListener('click', () => app.setPanelExpanded(false), { signal: events.signal });
-      refs.start.addEventListener('click', () => app.start(), { signal: events.signal });
-      refs.pause.addEventListener('click', () => app.pause(), { signal: events.signal });
-      refs.commentToggle.addEventListener('click', () => app.toggleExpandComments(), { signal: events.signal });
-      refs.speedRange.addEventListener('input', event => app.setScrollSpeed(event.target.value), { signal: events.signal });
-      refs.intervalRange.addEventListener('input', event => app.setIntervalMs(event.target.value), { signal: events.signal });
-      refs.speedPresets.forEach(button =>
-        button.addEventListener('click', () => app.setScrollSpeed(button.dataset.speed), { signal: events.signal })
-      );
-      refs.intervalPresets.forEach(button =>
-        button.addEventListener('click', () => app.setIntervalMs(button.dataset.interval), { signal: events.signal })
-      );
-      global.addEventListener('resize', keepInViewport, { signal: events.signal });
-      bindDrag();
-      if (settings.panelPosition) moveTo(settings.panelPosition.left, settings.panelPosition.top);
-      else requestAnimationFrame(keepInViewport);
-      lastRender = {};
-      app.render();
-    }
-
     function destroy() {
       stopTimer();
-      clearTimeout(progressDisplay);
-      progressDisplay = null;
-      displayedAnswerCount = null;
-      targetAnswerCount = 0;
-      progressTotal = '?';
-      events?.abort();
-      root?.remove();
-      style?.remove();
-      root = style = refs = events = null;
-      lastRender = {};
+      text = '已销毁';
     }
 
-    return { create, destroy, render, setStatus, startTimer, stopTimer, contains: node => root?.contains(node) };
+    return { getStatus: () => text, setStatus, startTimer, stopTimer, destroy };
   })();
 
   const clickClassifier = Object.freeze({
@@ -777,19 +473,32 @@
       });
     }
 
-    function discoverAnswers(root) {
-      const answers = [];
-      if (root?.matches?.(ANSWER_SELECTOR)) answers.push(root);
-      root?.querySelectorAll?.(ANSWER_SELECTOR).forEach(answer => answers.push(answer));
-      observeCommentActions(root);
-      for (const answer of answers) {
-        const answerId = getAnswerId(answer);
-        if (answerId && seenAnswerIds.has(answerId)) continue;
-        if (!answerId && seenAnswerNodes.has(answer)) continue;
-        if (answerId) seenAnswerIds.add(answerId);
-        else seenAnswerNodes.add(answer);
-        answerCount++;
+    function rememberAnswer(answer) {
+      const answerId = getAnswerId(answer);
+      if (answerId && seenAnswerIds.has(answerId)) return false;
+      if (!answerId && seenAnswerNodes.has(answer)) return false;
+      if (answerId) seenAnswerIds.add(answerId);
+      else seenAnswerNodes.add(answer);
+      answerCount++;
+      return true;
+    }
+
+    function discoverAnswerNodes(root) {
+      let addedCount = 0;
+      for (const answer of collectAnswerElements(root)) {
+        if (rememberAnswer(answer)) addedCount++;
       }
+      return addedCount;
+    }
+
+    function discoverAnswers(root) {
+      const addedCount = discoverAnswerNodes(root);
+      observeCommentActions(root);
+      return addedCount;
+    }
+
+    function syncAnswerCount() {
+      return discoverAnswerNodes(document);
     }
 
     function queueRoots(roots) {
@@ -1011,6 +720,7 @@
       closeUnexpectedCommentDialogs,
       processPending,
       reset,
+      syncAnswerCount,
       getAnswerCount: () => answerCount,
       hasPendingCommentEntry: () => pendingCommentEntries.size > 0,
       clearPendingCommentEntries: () => pendingCommentEntries.clear(),
@@ -1116,7 +826,7 @@
         document.querySelector(QUESTION_ROOT_SELECTOR) ||
         document.body;
       observer = new MutationObserver(records => {
-        const roots = collectAddedRoots(records).filter(root => !panel.contains(root));
+        const roots = collectAddedRoots(records);
         if (!roots.length) return;
         expander.queueRoots(roots);
         requestSoon();
@@ -1200,6 +910,7 @@
     let idleRounds = 0;
     let previousAnswerCount = 0;
     let previousScrollHeight = 0;
+    let commentWaitRounds = 0;
     let totalAnswerCount = null;
     let totalScrollMs = 0;
     let timerStartedAt = null;
@@ -1218,7 +929,7 @@
         scrollSpeed: settings.scrollSpeed,
         intervalMs: settings.intervalMs,
         expandComments: settings.expandComments,
-        panelExpanded: settings.panelExpanded,
+        status: runtimeStatus.getStatus(),
         totalScrollMs:
           totalScrollMs +
           (scheduler.getState() === 'running' && timerStartedAt ? Date.now() - timerStartedAt : 0),
@@ -1229,14 +940,13 @@
       };
     }
 
-    function render() {
-      panel.render(snapshot());
-    }
+    function render() {}
 
     function resetPageState() {
       idleRounds = 0;
       previousAnswerCount = 0;
       previousScrollHeight = scroller.getHeight();
+      commentWaitRounds = 0;
       expander.reset();
       scroller.reset();
       totalAnswerCount = getTotalAnswerCount();
@@ -1245,14 +955,15 @@
     function start() {
       if (destroyed || !questionId() || scheduler.getState() === 'running') return;
       idleRounds = 0;
+      commentWaitRounds = 0;
       completionStatus = 'running';
       completionReason = 'running';
       previousAnswerCount = expander.getAnswerCount();
       previousScrollHeight = scroller.getHeight();
       timerStartedAt = Date.now();
       scheduler.start();
-      panel.startTimer();
-      panel.setStatus('运行中');
+      runtimeStatus.startTimer();
+      runtimeStatus.setStatus('运行中');
       render();
     }
 
@@ -1264,8 +975,8 @@
         completionReason = 'manual';
       }
       scheduler.pause();
-      panel.stopTimer();
-      panel.setStatus(message);
+      runtimeStatus.stopTimer();
+      runtimeStatus.setStatus(message);
       render();
     }
 
@@ -1279,7 +990,7 @@
       try {
         throwIfAborted(signal);
         if (document.hidden) {
-          panel.setStatus('后台标签页：等待恢复');
+          runtimeStatus.setStatus('后台标签页：等待恢复');
           return;
         }
         const staleDialogResult = expander.closeUnexpectedCommentDialogs();
@@ -1298,21 +1009,40 @@
           }
         }
         if (document.hidden) {
-          panel.setStatus('后台标签页：等待恢复');
+          runtimeStatus.setStatus('后台标签页：等待恢复');
           return;
         }
-        const scrollChanged = commentClicked || expander.hasPendingCommentEntry()
-          ? (
-              await abortableSleep(POLICY.commentAppendDelayMs, signal),
-              expander.closeUnexpectedCommentDialogs(),
-              false
-            )
-          : await scroller.scrollPage(signal);
+        const waitingForComments = commentClicked || expander.hasPendingCommentEntry();
+        const waitForComments = shouldWaitForCommentAppend({
+          waitingForComments,
+          commentWaitRounds,
+        });
+        let scrollChanged = false;
+        if (waitForComments) {
+          commentWaitRounds++;
+          await abortableSleep(POLICY.commentAppendDelayMs, signal);
+          const dialogResult = expander.closeUnexpectedCommentDialogs();
+          if (dialogResult.authBlocked) {
+            complete('auth-blocked', 'auth-dialog', '已暂停：知乎要求登录或验证');
+            return;
+          }
+        } else {
+          commentWaitRounds = 0;
+          if (waitingForComments) {
+            const dialogResult = expander.closeUnexpectedCommentDialogs();
+            if (dialogResult.authBlocked) {
+              complete('auth-blocked', 'auth-dialog', '已暂停：知乎要求登录或验证');
+              return;
+            }
+          }
+          scrollChanged = await scroller.scrollPage(signal);
+        }
         if (document.hidden) {
-          panel.setStatus('后台标签页：等待恢复');
+          runtimeStatus.setStatus('后台标签页：等待恢复');
           return;
         }
         throwIfAborted(signal);
+        expander.syncAnswerCount();
         const answerCount = expander.getAnswerCount();
         totalAnswerCount = getTotalAnswerCount() ?? totalAnswerCount;
         const scrollHeight = scroller.getHeight();
@@ -1334,7 +1064,7 @@
         previousAnswerCount = answerCount;
         previousScrollHeight = scrollHeight;
         if (decision.waitForBottom) {
-          panel.setStatus(`底部刷新中 ${scroller.getBottomBounceRounds()}/${POLICY.maxBottomBounceRounds}`);
+          runtimeStatus.setStatus(`底部刷新中 ${scroller.getBottomBounceRounds()}/${POLICY.maxBottomBounceRounds}`);
         } else if (decision.shouldPause) {
           const completed = totalAnswerCount !== null && answerCount >= totalAnswerCount;
           complete(
@@ -1343,7 +1073,7 @@
             completed ? '已完成：已发现全部回答' : '已自动暂停：连续多轮无新回答'
           );
         } else {
-          panel.setStatus('运行中');
+          runtimeStatus.setStatus('运行中');
         }
         render();
       } catch (error) {
@@ -1382,14 +1112,8 @@
       render();
     }
 
-    function setPanelExpanded(expanded) {
-      settings.panelExpanded = expanded === true;
-      storage.save(settings);
-      render();
-    }
-
     function renderVisibilityStatus(hidden) {
-      panel.setStatus(hidden ? '后台标签页：等待恢复' : '运行中');
+      runtimeStatus.setStatus(hidden ? '后台标签页：等待恢复' : '运行中');
       render();
     }
 
@@ -1399,8 +1123,7 @@
       pause(nextQuestionId ? '已暂停：页面已切换' : '已暂停：已离开问题页');
       resetPageState();
       currentQuestionId = nextQuestionId;
-      if (nextQuestionId) panel.create();
-      else panel.destroy();
+      if (!nextQuestionId) runtimeStatus.setStatus('已暂停：已离开问题页');
     }
 
     function shouldExposeDebugApi() {
@@ -1416,7 +1139,6 @@
         setScrollSpeed,
         setIntervalMs,
         toggleExpandComments,
-        setPanelExpanded,
         get snapshot() { return Object.freeze({ ...snapshot(), idleRounds, answerCount: expander.getAnswerCount() }); },
       });
       Object.defineProperty(global, 'zhihuAutoExpand', {
@@ -1433,7 +1155,6 @@
         return;
       }
       currentQuestionId = questionId();
-      if (currentQuestionId) panel.create();
       resetPageState();
       exposeDebugApi();
       console.log('[Zhihu Auto Expand] loaded; debug API is disabled unless zhihu-auto-expand-debug=1');
@@ -1443,7 +1164,7 @@
       if (destroyed) return;
       destroyed = true;
       pause('已销毁');
-      panel.destroy();
+      runtimeStatus.destroy();
       try {
         delete global.zhihuAutoExpand;
       } catch {}
@@ -1460,7 +1181,6 @@
       setScrollSpeed,
       setIntervalMs,
       toggleExpandComments,
-      setPanelExpanded,
       handleRouteChange,
     };
   })();

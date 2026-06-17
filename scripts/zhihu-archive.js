@@ -12,18 +12,14 @@ const {
   parseQuestionUrlsFromFile,
   questionIdFromUrl,
   defaultArchivePath,
+  cleanArchiveTitle,
   toPositiveInt,
   toOptionalNumber,
   injectUserscript,
   configureAndStart,
   waitForAutomationDone,
-  normalizeCookiesForSingleFile,
-  getLocalStorageEntries,
-  writeJson,
   writeText,
-  writeSingleFileBootstrap,
-  runSingleFile,
-  createSingleFileTempDir,
+  savePageWithSingleFile,
   defaultDebugDir,
   formatBytes,
   formatAutomationProgress,
@@ -87,10 +83,7 @@ function formatTimeout(value) {
 }
 
 function normalizeTitle(value) {
-  return String(value || '')
-    .replace(/\s+-\s+知乎$/, '')
-    .replace(/^知乎\s+-\s+/, '')
-    .trim();
+  return cleanArchiveTitle(value);
 }
 
 function resolveTargets(args) {
@@ -177,9 +170,6 @@ async function runArchiveJob(browser, target, options) {
   let page = null;
   let singleFileResult = null;
   let output = null;
-  const tempDir = createSingleFileTempDir();
-  const cookiesFile = path.join(tempDir, 'cookies.json');
-  const bootstrapFile = path.join(tempDir, 'bootstrap.js');
   const startedAt = Date.now();
   let saveStartedAt = 0;
   try {
@@ -228,29 +218,13 @@ async function runArchiveJob(browser, target, options) {
     output = resolveOutput(target.id, pageTitle, options.args, options.multiple);
     ensureDir(path.dirname(output));
 
-    stage('4/6 Export auth state');
-    const storageState = await context.storageState();
-    writeJson(cookiesFile, normalizeCookiesForSingleFile(storageState.cookies || []));
-    writeSingleFileBootstrap(bootstrapFile, {
-      expandComments: options.expandComments,
-      scrollSpeed: options.scrollSpeed,
-      intervalMs: options.intervalMs,
-      timeoutMs: options.timeoutMs,
-      settleMs: options.settleMs,
-      localStorage: getLocalStorageEntries(storageState, new URL(target.href).origin),
-    });
+    stage('4/6 Prepare output');
 
-    stage(`5/6 Save with SingleFile: ${output}`);
+    stage(`5/6 Save current page with SingleFile: ${output}`);
     saveStartedAt = Date.now();
-    singleFileResult = await runSingleFile({
-      url: target.href,
+    singleFileResult = await savePageWithSingleFile(page, output, {
       output,
-      cookiesFile,
-      bootstrapFile,
-      headless: options.singleFileHeadless,
-      debug: options.debug,
       timeoutMs: options.timeoutMs,
-      browserExecutablePath: options.browserExecutablePath,
     });
     const saveMs = Date.now() - saveStartedAt;
 
@@ -277,7 +251,6 @@ async function runArchiveJob(browser, target, options) {
     logError(`Failed: ${classified.message}`);
     return { ok: false, url: target.href, code: classified.code, message: classified.message };
   } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
     if (ownsContext) await context?.close().catch(() => {});
     else await page?.close().catch(() => {});
   }
@@ -329,8 +302,6 @@ async function main() {
     authFile,
     multiple,
     context,
-    browserExecutablePath: launched.executable,
-    singleFileHeadless: false,
     debug,
     expandComments: args.comments === true || args['expand-comments'] === true || args['open-comments'] === true,
     scrollSpeed: toOptionalNumber(args.speed),

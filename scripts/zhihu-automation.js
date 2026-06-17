@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 
 const PACKAGE_DIR = path.join(__dirname, '..');
 const ROOT_DIR = process.cwd();
@@ -10,12 +11,11 @@ const AUTH_FILE = path.join(AUTH_DIR, 'zhihu.storageState.json');
 const ARCHIVES_DIR = path.join(ROOT_DIR, 'archives');
 const TEST_RESULTS_DIR = path.join(ROOT_DIR, 'test-results');
 const USER_SCRIPT_FILE = path.join(PACKAGE_DIR, 'zhihu-auto-scroll.js');
-const SINGLE_FILE_BIN = path.join(PACKAGE_DIR, 'node_modules', 'single-file-cli', 'single-file-node.js');
+const SINGLE_FILE_SCRIPT_FILE = path.join(PACKAGE_DIR, 'node_modules', 'single-file-cli', 'lib', 'single-file-script.js');
 const LOGIN_URL = 'https://www.zhihu.com/signin?next=%2F';
 const DEFAULT_TIMEOUT_MS = 0;
 const DEFAULT_SETTLE_MS = 1500;
-const MAX_TIMER_DELAY_MS = 2147483647;
-const SINGLE_FILE_TEMP_PREFIX = 'zhihu.singlefile.';
+const SINGLE_FILE_WRITE_CHUNK_SIZE = 1024 * 1024;
 const DEFAULT_VIEWPORT = { width: 1280, height: 900 };
 const SYSTEM_BROWSER_CHANNELS = ['chrome', 'msedge'];
 const BROWSER_CANDIDATES = {
@@ -30,6 +30,7 @@ const BROWSER_CANDIDATES = {
     ['LOCALAPPDATA', 'Microsoft\\Edge\\Application\\msedge.exe'],
   ],
 };
+let singleFileScriptSourcePromise = null;
 
 function parseArgs(argv) {
   const args = {};
@@ -82,6 +83,7 @@ function parseQuestionUrl(value) {
   }
   const id = questionIdFromUrl(url.href);
   if (!id) throw new Error('Only Zhihu question URLs are supported, for example: https://www.zhihu.com/question/123');
+  url.pathname = `/question/${id}`;
   return { href: url.href, id };
 }
 
@@ -117,10 +119,17 @@ function safeTitleForFilename(value, maxLength = 80) {
   return normalized.slice(0, maxLength).replace(/-+$/g, '');
 }
 
+function cleanArchiveTitle(value) {
+  return String(value || '')
+    .replace(/\s+-\s+知乎$/, '')
+    .replace(/^知乎\s+-\s+/, '')
+    .replace(/^\(\s*\d+\s*封私信\s*(?:\/|｜|-)?\s*\d+\s*条消息\s*\)\s*/, '')
+    .trim();
+}
+
 function defaultArchivePath(questionId, date = new Date(), title = '') {
-  const safeTitle = safeTitleForFilename(title);
-  const titlePart = safeTitle ? `-${safeTitle}` : '';
-  return path.join(ARCHIVES_DIR, `zhihu-question-${questionId}${titlePart}-${timestampForFilename(date)}.html`);
+  const safeTitle = safeTitleForFilename(cleanArchiveTitle(title) || questionId || 'zhihu-archive');
+  return path.join(ARCHIVES_DIR, `${safeTitle}.html`);
 }
 
 function toPositiveInt(value, fallback) {
@@ -350,20 +359,6 @@ async function waitForAutomationDone(page, options = {}) {
   }
 }
 
-function cleanupLegacySingleFileTemps(dir = AUTH_DIR) {
-  if (!fs.existsSync(dir)) return;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.name.startsWith(SINGLE_FILE_TEMP_PREFIX)) continue;
-    fs.rmSync(path.join(dir, entry.name), { recursive: true, force: true });
-  }
-}
-
-function createSingleFileTempDir(date = new Date()) {
-  ensureDir(AUTH_DIR);
-  cleanupLegacySingleFileTemps(AUTH_DIR);
-  return fs.mkdtempSync(path.join(AUTH_DIR, `${SINGLE_FILE_TEMP_PREFIX}${timestampForFilename(date)}.`));
-}
-
 function defaultDebugDir(date = new Date()) {
   return path.join(TEST_RESULTS_DIR, `zhihu-archive-${timestampForFilename(date)}`);
 }
@@ -420,27 +415,6 @@ function classifyArchiveError(error, details = {}) {
   };
 }
 
-function normalizeCookiesForSingleFile(cookies) {
-  return cookies.map(cookie => {
-    const result = {
-      name: cookie.name,
-      value: cookie.value,
-      domain: cookie.domain,
-      path: cookie.path || '/',
-      secure: Boolean(cookie.secure),
-      httpOnly: Boolean(cookie.httpOnly),
-      sameSite: cookie.sameSite,
-    };
-    if (Number.isFinite(cookie.expires) && cookie.expires > 0) result.expires = cookie.expires;
-    return result;
-  });
-}
-
-function getLocalStorageEntries(storageState, origin) {
-  const matched = storageState.origins?.find(entry => entry.origin === origin);
-  return matched?.localStorage || [];
-}
-
 async function hydrateContextFromStorageState(context, storageStateFile = AUTH_FILE) {
   const storageState = JSON.parse(fs.readFileSync(storageStateFile, 'utf8'));
   if (Array.isArray(storageState.cookies) && storageState.cookies.length > 0) {
@@ -477,127 +451,93 @@ function writeText(file, value) {
   fs.writeFileSync(file, String(value || ''));
 }
 
-function writeSingleFileBootstrap(file, options = {}) {
-  ensureDir(path.dirname(file));
-  const config = {
-    expandComments: options.expandComments,
-    scrollSpeed: options.scrollSpeed,
-    intervalMs: options.intervalMs,
-    timeoutMs: toPositiveInt(options.timeoutMs, DEFAULT_TIMEOUT_MS),
-    settleMs: toPositiveInt(options.settleMs, DEFAULT_SETTLE_MS),
-    localStorage: options.localStorage || [],
-  };
-  const source = `
-(() => {
-  const config = ${JSON.stringify(config)};
-  globalThis.__ZAE_AUTOMATION__ = true;
-  for (const entry of config.localStorage) {
+async function loadSingleFileScriptSource() {
+  if (!singleFileScriptSourcePromise) {
+    singleFileScriptSourcePromise = import(pathToFileURL(SINGLE_FILE_SCRIPT_FILE).href)
+      .then(module => module.getScriptSource({}));
+  }
+  return singleFileScriptSourcePromise;
+}
+
+async function savePageWithSingleFile(page, output, options = {}) {
+  ensureDir(path.dirname(output));
+  const tempOutput = `${output}.tmp-${process.pid}-${Date.now()}`;
+  const bindingName = `__zhihuWriteSingleFileChunk_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  fs.writeFileSync(tempOutput, '');
+  await page.exposeFunction('__singleFileFetch', async requestJson => {
+    const request = JSON.parse(requestJson);
     try {
-      localStorage.setItem(entry.name, entry.value);
-    } catch {}
-  }
-  const singlefile = globalThis.singlefile;
-  const originalGetPageData = singlefile && singlefile.getPageData && singlefile.getPageData.bind(singlefile);
-  if (!originalGetPageData) return;
-  singlefile.getPageData = async options => {
-    await waitFor(() => globalThis.zhihuAutoExpand && typeof globalThis.zhihuAutoExpand.start === "function", 15000);
-    const api = globalThis.zhihuAutoExpand;
-    if (config.scrollSpeed !== undefined) api.setScrollSpeed(config.scrollSpeed);
-    if (config.intervalMs !== undefined) api.setIntervalMs(config.intervalMs);
-    if (config.expandComments !== undefined && api.snapshot.expandComments !== config.expandComments) {
-      api.toggleExpandComments();
+      const response = await fetch(request.url);
+      const data = Buffer.from(await response.arrayBuffer()).toString('base64');
+      await page.evaluate(({ requestId, result }) => {
+        globalThis.__singleFileResolveFetch(requestId, result);
+      }, {
+        requestId: request.requestId,
+        result: {
+          status: response.status,
+          headers: Array.from(response.headers.entries()),
+          data,
+        },
+      });
+    } catch (error) {
+      await page.evaluate(({ requestId, result }) => {
+        globalThis.__singleFileRejectFetch(requestId, result);
+      }, {
+        requestId: request.requestId,
+        result: {
+          error: error?.message || String(error),
+        },
+      });
     }
-    api.start();
-    await waitFor(() => api.snapshot.completionStatus === "running", 5000).catch(() => {});
-    await waitFor(() => {
-      const status = api.snapshot.completionStatus;
-      return status && status !== "running" && status !== "paused";
-    }, config.timeoutMs);
-    await sleep(config.settleMs);
-    return originalGetPageData(options);
-  };
-
-  function sleep(delay) {
-    return new Promise(resolve => setTimeout(resolve, delay));
-  }
-
-  function waitFor(predicate, timeout) {
-    const startedAt = Date.now();
-    return new Promise((resolve, reject) => {
-      const timer = setInterval(() => {
-        try {
-          if (predicate()) {
-            clearInterval(timer);
-            resolve();
-          } else if (timeout > 0 && Date.now() - startedAt > timeout) {
-            clearInterval(timer);
-            reject(new Error("Timed out waiting for Zhihu automation"));
-          }
-        } catch (error) {
-          clearInterval(timer);
-          reject(error);
-        }
-      }, 250);
-    });
-  }
-})();
-`;
-  fs.writeFileSync(file, source.trimStart());
-}
-
-function runSingleFile(options) {
-  const browserLoadMaxTime = toSingleFileMaxTime(options.loadTimeoutMs, 120000);
-  const browserCaptureMaxTime = toSingleFileMaxTime(options.captureTimeoutMs, options.timeoutMs);
-  return new Promise((resolve, reject) => {
-    const args = [
-      SINGLE_FILE_BIN,
-      options.url,
-      options.output,
-      '--browser-cookies-file',
-      options.cookiesFile,
-      '--browser-script',
-      options.bootstrapFile,
-      '--browser-script',
-      USER_SCRIPT_FILE,
-      `--browser-headless=${options.headless !== false}`,
-      '--browser-load-max-time',
-      String(browserLoadMaxTime),
-      '--browser-capture-max-time',
-      String(browserCaptureMaxTime),
-      '--browser-wait-until',
-      'networkAlmostIdle',
-      '--block-scripts=false',
-    ];
-    if (options.browserExecutablePath) {
-      args.push('--browser-executable-path', options.browserExecutablePath);
-    }
-    if (options.debug) args.push('--browser-debug=true');
-
-    const child = spawn(process.execPath, args, {
-      cwd: ROOT_DIR,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', code => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        const error = new Error(`SingleFile save failed with exit code ${code}${stderr ? `: ${stderr.trim()}` : ''}`);
-        error.stdout = stdout;
-        error.stderr = stderr;
-        reject(error);
-      }
-    });
   });
-}
-
-function toSingleFileMaxTime(value, fallback = DEFAULT_TIMEOUT_MS) {
-  const timeoutMs = toPositiveInt(value, fallback);
-  return timeoutMs > 0 ? timeoutMs : MAX_TIMER_DELAY_MS;
+  await page.exposeFunction(bindingName, chunk => {
+    fs.appendFileSync(tempOutput, chunk);
+  });
+  try {
+    const source = await loadSingleFileScriptSource();
+    await page.evaluate(scriptSource => {
+      if (!globalThis.singlefile?.getPageData) {
+        globalThis.eval(scriptSource);
+      }
+    }, source);
+    const result = await page.evaluate(async ({ bindingName, chunkSize, singleFileOptions }) => {
+      const pageData = await globalThis.singlefile.getPageData(singleFileOptions);
+      let content = pageData.content;
+      if (content instanceof Uint8Array) {
+        content = new TextDecoder().decode(content);
+      }
+      if (typeof content !== 'string') content = String(content || '');
+      for (let index = 0; index < content.length; index += chunkSize) {
+        await globalThis[bindingName](content.slice(index, index + chunkSize));
+      }
+      return { contentLength: content.length };
+    }, {
+      bindingName,
+      chunkSize: SINGLE_FILE_WRITE_CHUNK_SIZE,
+      singleFileOptions: {
+        loadDeferredImages: true,
+        loadDeferredImagesMaxIdleTime: 1500,
+        compressHTML: true,
+        removeHiddenElements: true,
+        removeUnusedStyles: true,
+        removeUnusedFonts: true,
+        removeAlternativeFonts: true,
+        removeAlternativeMedias: true,
+        removeAlternativeImages: true,
+        removeNoScriptTags: true,
+        groupDuplicateImages: true,
+        ...(options.singleFileOptions || {}),
+        blockScripts: true,
+        insertMetaCSP: true,
+      },
+    });
+    fs.rmSync(output, { force: true });
+    fs.renameSync(tempOutput, output);
+    return { stdout: '', stderr: '', ...result };
+  } catch (error) {
+    fs.rmSync(tempOutput, { force: true });
+    throw error;
+  }
 }
 
 module.exports = {
@@ -610,9 +550,8 @@ module.exports = {
   LOGIN_URL,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_SETTLE_MS,
-  MAX_TIMER_DELAY_MS,
   DEFAULT_VIEWPORT,
-  SINGLE_FILE_TEMP_PREFIX,
+  SINGLE_FILE_WRITE_CHUNK_SIZE,
   parseArgs,
   ensureDir,
   fileExists,
@@ -621,9 +560,9 @@ module.exports = {
   parseQuestionUrlsFromFile,
   timestampForFilename,
   safeTitleForFilename,
+  cleanArchiveTitle,
   defaultArchivePath,
   toPositiveInt,
-  toSingleFileMaxTime,
   toOptionalNumber,
   normalizeBrowserChannel,
   browserChannelLabel,
@@ -636,17 +575,13 @@ module.exports = {
   injectUserscript,
   configureAndStart,
   waitForAutomationDone,
-  cleanupLegacySingleFileTemps,
-  createSingleFileTempDir,
   defaultDebugDir,
   formatBytes,
   formatAutomationProgress,
   classifyArchiveError,
-  normalizeCookiesForSingleFile,
-  getLocalStorageEntries,
   hydrateContextFromStorageState,
   writeJson,
   writeText,
-  writeSingleFileBootstrap,
-  runSingleFile,
+  loadSingleFileScriptSource,
+  savePageWithSingleFile,
 };
