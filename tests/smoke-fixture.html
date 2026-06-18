@@ -17,18 +17,17 @@
   </style>
 </head>
 <body>
-  <header><button data-decoy="header">显示全部</button></header>
+  <header><button data-decoy="header">添加评论</button></header>
   <main class="Question-main">
     <section class="Question-mainColumn">
       <div class="QuestionAnswers-answers">
         <div class="List-header"><h4 class="List-headerText"><span>3 个回答</span></h4></div>
         <article class="AnswerItem" data-zop='{"itemId":"answer-1"}'>
           <button data-answer="1">阅读全文</button>
-          <div class="ContentItem-actions floating-actions"><button data-floating-comment>打开 40 条评论</button></div>
+          <div class="ContentItem-actions floating-actions"><button data-floating-comment>添加评论</button></div>
           <div class="ContentItem-actions">
-            <button data-bottom-comment>打开 40 条评论</button>
-            <button data-known-modal-comment aria-haspopup="dialog">打开 8 条评论</button>
-            <button data-unknown-modal-comment>打开 7 条评论</button>
+            <button data-bottom-comment>添加评论</button>
+            <button data-unknown-modal-comment>162条评论</button>
           </div>
         </article>
         <button data-load-more="1">加载更多</button>
@@ -44,10 +43,12 @@
       decoyClicks: 0,
       floatingCommentClicks: 0,
       bottomCommentClicks: 0,
-      knownModalCommentClicks: 0,
       unknownModalCommentClicks: 0,
       closedModalComments: 0,
       replyExpandClicks: 0,
+      moreCommentClicks: 0,
+      modalReplyExpandClicks: 0,
+      modalMoreCommentClicks: 0,
       initialCommentAttempts: 0,
       scrollBehaviors: [],
     };
@@ -68,41 +69,76 @@
     document.querySelector('[data-floating-comment]').addEventListener('click', () => {
       window.smoke.floatingCommentClicks++;
     });
-    document.querySelector('[data-known-modal-comment]').addEventListener('click', () => {
-      window.smoke.knownModalCommentClicks++;
-    });
     document.querySelector('[data-unknown-modal-comment]').addEventListener('click', () => {
       window.smoke.unknownModalCommentClicks++;
-      if (document.querySelector('.Modal-content')) return;
-      const dialog = document.createElement('section');
-      dialog.className = 'css-19q29v6';
-      dialog.innerHTML = '<button type="button" aria-label="关闭">关闭</button><div class="Modal-content css-1svde17"><p>162 条评论 默认最新</p></div>';
-      dialog.querySelector('button').addEventListener('click', () => {
-        window.smoke.closedModalComments++;
-        dialog.remove();
-      });
-      document.body.appendChild(dialog);
+      if (window.smoke.unknownModalPending || document.querySelector('.Modal-content')) return;
+      window.smoke.unknownModalPending = true;
+      setTimeout(() => {
+        window.smoke.unknownModalPending = false;
+        if (document.querySelector('.Modal-content')) return;
+        const dialog = document.createElement('section');
+        dialog.className = 'css-19q29v6';
+        dialog.innerHTML = `
+          <button type="button" aria-label="关闭">关闭</button>
+          <div class="Modal-content css-1svde17">
+            <p>162 条评论 默认最新</p>
+            <p>登录后可发表评论</p>
+            <div class="CommentItemV2">
+              <button data-modal-expand-replies>查看全部 3 条回复</button>
+            </div>
+            <button data-modal-more-comments>点击查看全部评论</button>
+          </div>`;
+        dialog.querySelector('button').addEventListener('click', () => {
+          window.smoke.closedModalComments++;
+          dialog.remove();
+        });
+        dialog.querySelector('[data-modal-expand-replies]').addEventListener('click', replyEvent => {
+          window.smoke.modalReplyExpandClicks++;
+          const next = document.createElement('button');
+          next.textContent = '查看更多 1 条回复';
+          next.addEventListener('click', nextEvent => {
+            window.smoke.modalReplyExpandClicks++;
+            nextEvent.currentTarget.remove();
+          });
+          replyEvent.currentTarget.replaceWith(next);
+        });
+        dialog.querySelector('[data-modal-more-comments]').addEventListener('click', moreEvent => {
+          window.smoke.modalMoreCommentClicks++;
+          const comment = document.createElement('div');
+          comment.className = 'CommentItemV2';
+          comment.textContent = 'Modal 已加载全部评论';
+          moreEvent.currentTarget.replaceWith(comment);
+        });
+        document.body.appendChild(dialog);
+      }, 300);
     });
     document.querySelector('[data-bottom-comment]').addEventListener('click', event => {
       window.smoke.bottomCommentClicks++;
       window.smoke.initialCommentAttempts++;
-      if (window.smoke.initialCommentAttempts === 1) return;
       if (event.currentTarget.closest('.AnswerItem').querySelector('.Comments-container')) return;
       const comments = document.createElement('section');
       comments.className = 'Comments-container';
       comments.innerHTML = `
         <div class="CommentItemV2">
-          <button data-expand-replies>展开其他 4 条回复</button>
-        </div>`;
+          <button data-expand-replies>查看全部 4 条回复</button>
+        </div>
+        <button data-more-comments>点击查看全部评论</button>`;
       comments.querySelector('[data-expand-replies]').addEventListener('click', replyEvent => {
         window.smoke.replyExpandClicks++;
         const next = document.createElement('button');
-        next.textContent = '展开其他 2 条回复';
+        next.textContent = '查看更多 2 条回复';
         next.addEventListener('click', nextEvent => {
           window.smoke.replyExpandClicks++;
           nextEvent.currentTarget.remove();
         });
         replyEvent.currentTarget.replaceWith(next);
+      });
+      comments.querySelector('[data-more-comments]').addEventListener('click', moreEvent => {
+        window.smoke.moreCommentClicks++;
+        const comment = document.createElement('div');
+        comment.className = 'CommentItemV2';
+        comment.textContent = '已加载全部评论';
+        moreEvent.currentTarget.replaceWith(comment);
       });
       event.currentTarget.closest('.AnswerItem').appendChild(comments);
     });

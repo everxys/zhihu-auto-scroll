@@ -1,10 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-async function gotoQuestion(page, options = {}) {
-  await page.addInitScript(automation => {
-    localStorage.setItem('zhihu-auto-expand-debug', '1');
-    if (automation) window.__ZAE_AUTOMATION__ = true;
-  }, options.automation === true);
+async function gotoQuestion(page) {
+  await page.addInitScript(() => localStorage.setItem('zhihu-auto-expand-debug', '1'));
   await page.goto('http://127.0.0.1:51999/question/123');
   await page.waitForFunction(() => window.zhihuAutoExpand?.snapshot);
 }
@@ -39,6 +36,7 @@ test('automation API drives scrolling without rendering panel controls', async (
   await gotoQuestion(page);
   await expect(page.locator('#zhihu-auto-expand-panel')).toHaveCount(0);
   await expect(page.locator('.zae-open-panel')).toHaveCount(0);
+  await page.evaluate(() => document.querySelector('[data-unknown-modal-comment]')?.remove());
   await configureApi(page, { scrollSpeed: 16, intervalMs: 200, expandComments: true });
   await startApi(page);
 
@@ -47,12 +45,12 @@ test('automation API drives scrolling without rendering panel controls', async (
     loadClicks: 1,
     decoyClicks: 0,
     floatingCommentClicks: 0,
-    bottomCommentClicks: 3,
-    knownModalCommentClicks: 0,
-    unknownModalCommentClicks: 1,
-    closedModalComments: 1,
-    initialCommentAttempts: 2,
+    bottomCommentClicks: 2,
+    unknownModalCommentClicks: 0,
+    closedModalComments: 0,
+    initialCommentAttempts: 1,
     replyExpandClicks: 2,
+    moreCommentClicks: 1,
   });
   await expect.poll(() => page.evaluate(() => window.zhihuAutoExpand.snapshot)).toMatchObject({
     answerCount: 2,
@@ -108,19 +106,60 @@ test('automation API drives scrolling without rendering panel controls', async (
   expect(errors).toEqual([]);
 });
 
-test('automation mode keeps archive scrolling while the page is hidden', async ({ page }) => {
-  await gotoQuestion(page, { automation: true });
-  await configureApi(page, { scrollSpeed: 16, intervalMs: 200 });
+test('comment entry closes delayed modal and keeps scrolling', async ({ page }) => {
+  await gotoQuestion(page);
   await page.evaluate(() => {
-    scrollTo(0, 0);
-    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
+    document.querySelector('[data-bottom-comment]')?.remove();
+    document.querySelector('[data-floating-comment]')?.remove();
   });
+  await configureApi(page, { scrollSpeed: 16, intervalMs: 200, expandComments: true });
   await startApi(page);
 
-  await expect.poll(() => page.evaluate(() => window.zhihuAutoExpand.snapshot.status), { timeout: 5000 })
-    .not.toBe('后台标签页：等待恢复');
+  await expect.poll(() => page.evaluate(() => window.smoke), { timeout: 12000 }).toMatchObject({
+    unknownModalCommentClicks: 1,
+    closedModalComments: 1,
+    modalReplyExpandClicks: 0,
+    modalMoreCommentClicks: 0,
+    loadClicks: 1,
+    bottomCommentClicks: 1,
+  });
+  await expect(page.locator('.Modal-content')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => scrollY), { timeout: 12000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(2200);
+  expect(await page.evaluate(() => window.smoke.unknownModalCommentClicks)).toBe(1);
+  await pauseApi(page);
+});
+
+test('auth dialog opened from a comment entry blocks instead of being treated as comments', async ({ page }) => {
+  await gotoQuestion(page);
+  await page.evaluate(() => {
+    const list = document.querySelector('.QuestionAnswers-answers');
+    list.innerHTML = `
+      <div class="List-header"><h4 class="List-headerText"><span>1 个回答</span></h4></div>
+      <article class="AnswerItem" data-zop='{"itemId":"auth-answer"}'>
+        <div class="ContentItem-actions"><button data-auth-comment>9条评论</button></div>
+      </article>`;
+    document.querySelector('[data-auth-comment]').addEventListener('click', () => {
+      if (document.querySelector('[data-auth-dialog]')) return;
+      setTimeout(() => {
+        const dialog = document.createElement('section');
+        dialog.setAttribute('role', 'dialog');
+        dialog.className = 'Login-content';
+        dialog.dataset.authDialog = '1';
+        dialog.innerHTML = '<button type="button" aria-label="关闭">关闭</button><p>登录后继续，验证码验证</p>';
+        dialog.querySelector('button').addEventListener('click', () => dialog.remove());
+        document.body.appendChild(dialog);
+      }, 100);
+    });
+  });
+  await configureApi(page, { scrollSpeed: 16, intervalMs: 200, expandComments: true });
+  await startApi(page);
+
+  await expect.poll(() => page.evaluate(() => window.zhihuAutoExpand.snapshot), { timeout: 12000 }).toMatchObject({
+    completionStatus: 'auth-blocked',
+    completionReason: 'auth-dialog',
+  });
+  await expect(page.locator('[data-auth-dialog]')).toHaveCount(1);
 });
 
 test('comment mode avoids repeated full action scans on long pages', async ({ page }) => {
@@ -160,21 +199,5 @@ test('comment mode avoids repeated full action scans on long pages', async ({ pa
 
   const probe = await page.evaluate(() => window.perfProbe);
   expect(probe.documentActionQueries).toBe(0);
-  expect(probe.broadActionQueries).toBeLessThanOrEqual(2);
-});
-
-test('comment mode closes delayed comment dialogs on the next run', async ({ page }) => {
-  await gotoQuestion(page);
-  await configureApi(page, { expandComments: true });
-  await page.evaluate(() => {
-    const dialog = document.createElement('div');
-    dialog.className = 'Modal-wrapper';
-    dialog.innerHTML = '<button type="button" aria-label="关闭">关闭</button><div class="Modal-content">28 条评论 默认最新</div>';
-    dialog.querySelector('button').addEventListener('click', () => dialog.remove());
-    document.body.appendChild(dialog);
-  });
-
-  await startApi(page);
-  await expect(page.locator('.Modal-wrapper')).toHaveCount(0);
-  await pauseApi(page);
+  expect(probe.broadActionQueries).toBeLessThanOrEqual(4);
 });

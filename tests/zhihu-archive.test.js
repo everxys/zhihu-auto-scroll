@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createProgressReporter } = require('../scripts/zhihu-archive');
+const { createProgressReporter, isEnabledFlag } = require('../scripts/zhihu-archive');
 
 test('progress reporter prints timestamped unique progress only once', () => {
   const lines = [];
@@ -32,4 +32,14 @@ test('progress reporter shows idle rounds only when greater than zero', () => {
   }
 
   assert.match(lines[0], /idle rounds: 1$/);
+});
+
+test('archive boolean flags accept positional and equals forms', () => {
+  assert.equal(isEnabledFlag(true), true);
+  assert.equal(isEnabledFlag('true'), true);
+  assert.equal(isEnabledFlag('1'), true);
+  assert.equal(isEnabledFlag('on'), true);
+  assert.equal(isEnabledFlag(undefined), false);
+  assert.equal(isEnabledFlag(false), false);
+  assert.equal(isEnabledFlag('false'), false);
 });

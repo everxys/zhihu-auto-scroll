@@ -82,6 +82,12 @@ function formatTimeout(value) {
   return value > 0 ? String(value) : 'off';
 }
 
+function isEnabledFlag(value) {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) return false;
+  return /^(1|true|yes|on)$/i.test(String(value).trim());
+}
+
 function normalizeTitle(value) {
   return cleanArchiveTitle(value);
 }
@@ -303,7 +309,7 @@ async function main() {
     multiple,
     context,
     debug,
-    expandComments: args.comments === true || args['expand-comments'] === true || args['open-comments'] === true,
+    expandComments: isEnabledFlag(args.comments) || isEnabledFlag(args['expand-comments']) || isEnabledFlag(args['open-comments']),
     scrollSpeed: toOptionalNumber(args.speed),
     intervalMs: toOptionalNumber(args.interval),
     progressIntervalMs: toPositiveInt(args['progress-interval-ms'], 3000),
@@ -346,4 +352,5 @@ if (require.main === module) {
 
 module.exports = {
   createProgressReporter,
+  isEnabledFlag,
 };

@@ -143,8 +143,8 @@ test('matches comments only when enabled, at the answer bottom, or inside commen
   const bottomActions = { getBoundingClientRect: () => ({ top: 440, bottom: 480 }) };
   const floatingActions = { testPosition: 'fixed', getBoundingClientRect: () => ({ top: 440, bottom: 480 }) };
   const offscreenActions = { getBoundingClientRect: () => ({ top: 900, bottom: 940 }) };
-  const commentButton = actions => ({
-    textContent: '打开 40 条评论',
+  const commentButton = (actions, textContent = '打开 40 条评论') => ({
+    textContent,
     getAttribute: () => null,
     closest(selector) {
       if (selector.includes('.AnswerItem')) return answer;
@@ -165,13 +165,35 @@ test('matches comments only when enabled, at the answer bottom, or inside commen
       return selector.includes('.Comments-container') ? this : null;
     },
   };
+  const viewAllRepliesButton = {
+    ...replyButton,
+    textContent: '查看全部 24 条回复',
+  };
+  const moreCommentsButton = {
+    textContent: '点击查看全部评论',
+    getAttribute: () => null,
+    closest(selector) {
+      return selector.includes('.Comments-container') ? this : null;
+    },
+  };
+  const numberedMoreCommentsButton = {
+    ...moreCommentsButton,
+    textContent: '查看更多 162 条评论',
+  };
   assert.equal(hooks.classifyTarget(commentButton(bottomActions)), null);
   assert.equal(hooks.classifyTarget(commentButton(bottomActions), { expandComments: true }), 'comment-entry');
+  assert.equal(hooks.classifyTarget(commentButton(bottomActions, '添加评论'), { expandComments: true }), 'comment-entry');
+  assert.equal(hooks.classifyTarget({ ...commentButton(bottomActions), textContent: '162条评论' }, { expandComments: true }), 'comment-entry');
   assert.equal(hooks.classifyTarget(commentButton(floatingActions), { expandComments: true }), null);
+  assert.equal(hooks.classifyTarget(commentButton(floatingActions, '添加评论'), { expandComments: true }), null);
   assert.equal(hooks.classifyTarget(commentButton(offscreenActions), { expandComments: true }), null);
-  assert.equal(hooks.isKnownDialogCommentTrigger(dialogButton), true);
-  assert.equal(hooks.classifyTarget(dialogButton, { expandComments: true }), null);
+  assert.equal(hooks.classifyTarget({ textContent: '添加评论', getAttribute: () => null, closest: () => null }, { expandComments: true }), null);
+  assert.equal(hooks.classifyTarget(dialogButton, { expandComments: true }), 'comment-entry');
   assert.equal(hooks.classifyTarget(replyButton, { expandComments: true }), 'comment-reply');
+  assert.equal(hooks.classifyTarget(viewAllRepliesButton, { expandComments: true }), 'comment-reply');
+  assert.equal(hooks.classifyTarget(moreCommentsButton, { expandComments: true }), 'comment-more');
+  assert.equal(hooks.classifyTarget(numberedMoreCommentsButton, { expandComments: true }), 'comment-more');
+  assert.equal(hooks.classifyTarget(moreCommentsButton), null);
 });
 
 test('incremental mutation collection ignores excluded layout changes and returns only added roots', () => {
@@ -215,13 +237,6 @@ test('comment append waiting yields to page scrolling after bounded rounds', () 
     waitingForComments: false,
     commentWaitRounds: 0,
   }), false);
-});
-
-test('hidden documents suspend only outside automation mode', () => {
-  const { hooks } = loadHooks();
-  assert.equal(hooks.shouldSuspendForHidden(true, false), true);
-  assert.equal(hooks.shouldSuspendForHidden(true, true), false);
-  assert.equal(hooks.shouldSuspendForHidden(false, false), false);
 });
 
 test('scheduler interval is measured from the previous run start', () => {

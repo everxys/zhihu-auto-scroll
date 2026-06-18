@@ -37,6 +37,18 @@ test('parses archive command arguments', () => {
     headed: true,
     speed: '4',
   });
+  assert.deepEqual(parseArgs(['--comments', '--url', 'https://www.zhihu.com/question/123']), {
+    comments: true,
+    url: 'https://www.zhihu.com/question/123',
+  });
+  assert.deepEqual(parseArgs(['--url', 'https://www.zhihu.com/question/123', '--comments']), {
+    url: 'https://www.zhihu.com/question/123',
+    comments: true,
+  });
+  assert.deepEqual(parseArgs(['--comments=true', '--url', 'https://www.zhihu.com/question/123']), {
+    comments: 'true',
+    url: 'https://www.zhihu.com/question/123',
+  });
 });
 
 test('normalizes browser channel options for CLI launches', () => {
@@ -68,6 +80,10 @@ test('accepts only zhihu question URLs', () => {
   assert.deepEqual(parseQuestionUrl('https://www.zhihu.com/question/33028679/answer/1962058612538081786'), {
     href: 'https://www.zhihu.com/question/33028679',
     id: '33028679',
+  });
+  assert.deepEqual(parseQuestionUrl('https://www.zhihu.com/question/286130359#CTZ_DEFAULT'), {
+    href: 'https://www.zhihu.com/question/286130359',
+    id: '286130359',
   });
   assert.equal(questionIdFromUrl('https://www.zhihu.com/question/456/answer/789'), '456');
   assert.throws(() => parseQuestionUrl('https://example.com/question/123'), /Only/);
